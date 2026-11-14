@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 
 import ray
 
@@ -37,6 +38,19 @@ class PearVLLMServer(LMCacheVLLMServer):
         return self.WORKER_EXTENSION
 
     async def run_server(self, args: argparse.Namespace) -> None:
+        if self.lmcache_sidecar is not None:
+            # verl enables expandable segments after preprocessing. LMCache's CUDA IPC needs
+            # native allocations; change this rollout actor before vLLM creates its workers.
+            from verl.utils.device import set_expandable_segments
+
+            config = os.environ.get("PYTORCH_ALLOC_CONF", os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""))
+            config = re.sub(r"(^|,)\s*expandable_segments\s*:[^,]*", r"\1expandable_segments:False", config)
+            if not re.search(r"(^|,)\s*expandable_segments\s*:", config):
+                config = f"{config},expandable_segments:False" if config else "expandable_segments:False"
+            # Both PyTorch aliases and vLLM's legacy-env guard must agree. Spawned workers
+            # inherit these values; separate trainer actors keep their allocator settings.
+            os.environ["PYTORCH_ALLOC_CONF"] = os.environ["PYTORCH_CUDA_ALLOC_CONF"] = config
+            set_expandable_segments(False)
         await super().run_server(args)
 
         if self.config.kernels:

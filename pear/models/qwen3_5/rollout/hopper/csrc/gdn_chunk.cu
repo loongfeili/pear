@@ -781,7 +781,6 @@ __global__ void __launch_bounds__(STATE_THREADS, 1) state_kernel(StateParams p) 
     fence_proxy_async();
     bar_math();
     const float scale = p.scale;
-    const bool hi_half = vb & 1;
     bf16* ob = p.o + ((int64_t)bos * HV + hv) * DV + SBV * vb;
     // descriptors (their start address field is addr >> 4: byte offsets >> 4 add to it)
     const uint64_t d_vs = desc_core(smem_u32(s.vs), 128, 1024), d_vn = desc_core(smem_u32(s.vn), 128, 1024);
@@ -800,10 +799,10 @@ __global__ void __launch_bounds__(STATE_THREADS, 1) state_kernel(StateParams p) 
           float r[2];
 #pragma unroll
           for (int e = 0; e < 2; e++) {
-            // in each of FLA's 64-column output tiles, columns 0-31 fma(scale, Am v, scale (q h^T exp(g))), columns
-            // 32-63 fma(scale, q h^T exp(g), scale (Am v)) (as LLVM contracted chunk_fwd_kernel_o): vb & 1 the half
+            // The pinned Triton 3.8.0 chunk_fwd_kernel_o fuses the scaled q h^T exp(g) term in every column.
+            // Keep the Am v multiplication separate to match that rounding order before the bf16 conversion.
             const float qe = f_mul(qh[4 * j + 2 * h2 + e], h2 ? eg1 : eg0), x = av[4 * j + 2 * h2 + e];
-            r[e] = hi_half ? f_fma(scale, qe, f_mul(scale, x)) : f_fma(scale, x, f_mul(scale, qe));
+            r[e] = f_fma(scale, qe, f_mul(scale, x));
           }
           *reinterpret_cast<uint32_t*>(&o[t * LD32 + 8 * j + 2 * t4]) = pack2(r[0], r[1]);
         }

@@ -19,7 +19,7 @@ CHECK_ACTION='{"arm": {"x": 2.0, "y": 0, "z": 0, "roll": 0, "pitch": 0, "yaw": 0
 # $WORK_DIR/runs/install/libero_run).
 check_environments() {
   (
-    export VERL_ENV=$ENVS/verl LOCAL_DIR=$WORK_DIR/cache/environment_test
+    export VERL_ENV=$ENVS/verl LOCAL_DIR=${PEAR_TEST_CACHE_DIR:-$WORK_DIR/cache/environment_test}
     # shellcheck source=../../../gpu_process_variables.sh
     source "$ROOT/scripts/gpu_process_variables.sh" "$VERL_ENV"
     "$VERL_ENV/bin/python" -m pytest "$ROOT/tests/test_training_environment_on_gpu.py"
@@ -38,6 +38,12 @@ require_tools curl getent tar sha256sum git patch perl gcc g++ nvidia-smi
 if ! nvidia-smi -L > /dev/null 2>&1; then
   echo "no GPU on $(hostname): run it on a GPU machine" >&2
   exit 1
+fi
+
+# Restored runtimes can run the official GPU and simulator checks without reinstalling anything.
+if [ "${PEAR_CHECK_ONLY:-0}" = 1 ]; then
+  check_environments
+  exit 0
 fi
 
 # for the targets below: an environment's files are copies of those in uv's cache, not links to them

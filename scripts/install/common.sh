@@ -15,7 +15,10 @@ WORK_DIR=${WORK_DIR:?set WORK_DIR to the work directory (outside the login home)
 # directory's parent may be shared with other users); one that exists keeps its mode
 # shellcheck disable=SC2174  # the mode is for the directories named, not for the parents -p makes
 mkdir -p -m 700 "$WORK_DIR" "$WORK_DIR"/{bin,cache,datasets,envs,models,runs,src,wheels}
-ENVS=$WORK_DIR/envs
+ENVS=${PEAR_ENVS_DIR:-$WORK_DIR/envs}
+INSTALL_BIN=${PEAR_BIN_DIR:-$WORK_DIR/bin}
+INSTALL_CACHE=${PEAR_CACHE_DIR:-$WORK_DIR/cache}
+mkdir -p "$ENVS" "$INSTALL_BIN" "$INSTALL_CACHE"
 # shellcheck source=versions.env
 source "$INSTALL_DIR/versions.env"
 # the machine type (uname -m) the tools' releases and checksums are named by
@@ -28,17 +31,17 @@ fi
 # uv: its binary, the Python builds it downloads, its cache, the directory of its tools, which uvx makes, and its
 # credentials store, where it looks when an index answers 404, stay in the work directory (by default the cache, the
 # tools and the store are in the login home)
-export PATH=$WORK_DIR/bin:$PATH
-export UV_PYTHON_INSTALL_DIR=$ENVS/uv-python
-export UV_CACHE_DIR=$WORK_DIR/cache/uv
-export UV_TOOL_DIR=$WORK_DIR/cache/uv_tools
-export UV_CREDENTIALS_DIR=$WORK_DIR/cache/uv_credentials
+export PATH=$INSTALL_BIN:$PATH
+export UV_PYTHON_INSTALL_DIR=${PEAR_PYTHON_INSTALL_DIR:-$ENVS/uv-python}
+export UV_CACHE_DIR=${PEAR_UV_CACHE_DIR:-$INSTALL_CACHE/uv}
+export UV_TOOL_DIR=${PEAR_UV_TOOL_DIR:-$INSTALL_CACHE/uv_tools}
+export UV_CREDENTIALS_DIR=${PEAR_UV_CREDENTIALS_DIR:-$INSTALL_CACHE/uv_credentials}
 # two commands at once in one work directory share uv's cache, where one waits for the other's download of a file both
 # need: in seconds, longer than uv's own 300, which a large wheel on a slow link takes
 export UV_LOCK_TIMEOUT=3600
 # pip, which the LMCache build runs: its cache in the work directory too, and no question to PyPI about pip's newest
 # version
-export PIP_CACHE_DIR=$WORK_DIR/cache/pip
+export PIP_CACHE_DIR=${PEAR_PIP_CACHE_DIR:-${PIP_CACHE_DIR:-$INSTALL_CACHE/pip}}
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 # uv's own Python builds, not the machine's; no project's configuration: run from inside a verl checkout uv would
 # apply that pyproject.toml, whose overrides are written for verl's own lock
@@ -46,6 +49,14 @@ export UV_PYTHON_PREFERENCE=only-managed UV_NO_CONFIG=1
 # a login shell's compiler modules or Conda base stay out: the builds see the machine's own toolchain only
 unset CC CXX FC F77 CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH PYTHONPATH
 unset CONDA_PREFIX CONDA_DEFAULT_ENV VIRTUAL_ENV
+# Opt-in, task-local forward-compatibility libraries, extracted without changing the host driver.
+if [ -n "${PEAR_CUDA_COMPAT_DIR:-}" ]; then
+  if [ ! -e "$PEAR_CUDA_COMPAT_DIR/libcuda.so.1" ]; then
+    echo "missing CUDA compatibility libcuda at $PEAR_CUDA_COMPAT_DIR" >&2
+    exit 1
+  fi
+  export LD_LIBRARY_PATH=$PEAR_CUDA_COMPAT_DIR
+fi
 # micromamba, for what conda-forge has and PyPI lacks (the targets mesa, imagemagick and numactl)
 MICROMAMBA=$ENVS/micromamba/bin/micromamba
 export MAMBA_ROOT_PREFIX=$ENVS/micromamba/root
@@ -97,10 +108,10 @@ install_uv() {
   local archive=uv-$MACHINE_TYPE-unknown-linux-gnu
   local sha256_name=UV_SHA256_$MACHINE_TYPE
 
-  if [ "$("$WORK_DIR/bin/uv" --version 2> /dev/null | cut -d ' ' -f 2)" != "$UV_VERSION" ]; then
-    download_checked "$UV_RELEASES_URL/$UV_VERSION/$archive.tar.gz" "${!sha256_name}" "$WORK_DIR/cache/$archive.tar.gz"
-    tar -xzf "$WORK_DIR/cache/$archive.tar.gz" -C "$WORK_DIR/bin" --strip-components=1 "$archive/uv" "$archive/uvx"
-    rm "$WORK_DIR/cache/$archive.tar.gz"
+  if [ "$("$INSTALL_BIN/uv" --version 2> /dev/null | cut -d ' ' -f 2)" != "$UV_VERSION" ]; then
+    download_checked "$UV_RELEASES_URL/$UV_VERSION/$archive.tar.gz" "${!sha256_name}" "$INSTALL_CACHE/$archive.tar.gz"
+    tar -xzf "$INSTALL_CACHE/$archive.tar.gz" -C "$INSTALL_BIN" --strip-components=1 "$archive/uv" "$archive/uvx"
+    rm "$INSTALL_CACHE/$archive.tar.gz"
   fi
   uv --version
 }
@@ -153,7 +164,7 @@ install_micromamba() {
 # a home directory (its repodata cache, its register of environments) stays in the work directory.
 install_conda_prefix() {
   local prefix=$1
-  local micromamba_home=$WORK_DIR/cache/micromamba
+  local micromamba_home=${PEAR_MAMBA_HOME:-$INSTALL_CACHE/micromamba}
   local inputs list list_args=()
 
   shift

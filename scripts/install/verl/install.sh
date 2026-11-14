@@ -185,7 +185,7 @@ fi
 # The environment's test, under the variables its processes run with: FlashInfer makes its workspace when it is
 # imported, under the home directory unless they name another place.
 (
-  export VERL_ENV LOCAL_DIR=$WORK_DIR/cache/environment_test
+  export VERL_ENV LOCAL_DIR=${PEAR_TEST_CACHE_DIR:-$WORK_DIR/cache/environment_test}
   # shellcheck source=../../gpu_process_variables.sh
   source "$ROOT/scripts/gpu_process_variables.sh" "$VERL_ENV"
   "$PYTHON" -m pytest "$ROOT/tests/test_training_environment_on_cpu.py"
