@@ -2,10 +2,11 @@
 # Reduced H20 Stage 1: 8 x 8 GPUs, 2 trainer nodes and 6 rollout nodes.
 # Reuse the frozen eight-GPU environment gate; this script does not certify 64-GPU training.
 set -euo pipefail
+[[ ${PEAR_SUPERVISED:-} == 1 ]] || { echo "Use merlin_stage1_entry.sh" >&2; exit 2; }
 # Remove the idle NERO task's Python/source-check contamination only.
 unset PYTHONPATH EXPECTED_GIT_COMMIT
 
-ROOT=/mnt/bn/ic-vlm/personal/loongfei.li03/pear_20261114
+ROOT=${PEAR_ROOT:?The owning controller must set PEAR_ROOT}
 RANK=${PEAR_NODE_RANK:-}
 HEAD_ADDRESS=
 LAUNCH_ID=
@@ -44,7 +45,7 @@ LIBERO_ENV=$(cd -- "${PEAR_ENVS_DIR:-$WORK_DIR/envs}/libero" && pwd -P)
 LIBERO_MESA_DIR=$(cd -- "${PEAR_ENVS_DIR:-$WORK_DIR/envs}/mesa" && pwd -P)
 export VERL_ENV LIBERO_MESA_DIR
 export LIBERO_PYTHON=$LIBERO_ENV/bin/python LIBERO_CONFIG_PATH=$LIBERO_ENV/etc/libero
-export RUN=$WORK_DIR/runs/stage1_64
+export RUN=${PEAR_RUN:?The owning controller must select and lock RUN}
 export MODEL=${MODEL:-$WORK_DIR/models/Qwen3.8-27B}
 export GPU=h100 TRAINER_NNODES=2 ROLLOUT_NNODES=6 STEPS
 # Keep the reviewed full Stage 1 algorithm sizes; no smoke overrides leak in.
@@ -77,14 +78,8 @@ cleanup() {
   if [[ "$FINISHED" != 1 && ! -f "$CONTROL/failure.$RANK" ]]; then
     printf 'rank=%s exited status=%s\n' "$RANK" "$status" > "$CONTROL/failure.$RANK"
   fi
-  # Only groups created by this invocation; never ray stop / pkill shared processes.
-  for pid in "$TRAIN_PID" "$RAY_PID"; do
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then kill -TERM -- "-$pid" 2>/dev/null || true; fi
-  done
-  sleep 2
-  for pid in "$TRAIN_PID" "$RAY_PID"; do
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then kill -KILL -- "-$pid" 2>/dev/null || true; fi
-  done
+  # The outer Linux subreaper owns the complete process tree, including orphaned
+  # and setsid descendants. It performs verified cleanup even after leaders exit.
   exit "$status"
 }
 trap cleanup EXIT
@@ -126,7 +121,7 @@ record = {
     'baseline_candidate_record_unchanged': saved['candidate'],
     'source_sha256': saved['source_sha256'], 'runtime_bundle_sha256': saved['runtime_bundle']['sha256'],
     'launcher_sha256': {name: hashlib.sha256((launch / name).read_bytes()).hexdigest()
-                       for name in ['stage1_node.sh', 'merlin_stage1_entry.sh', 'network_env.sh', 'start_ray_node.sh', 'validate_cluster64.py']},
+                       for name in ['stage1_node.sh', 'merlin_stage1_entry.sh', 'worker_entry.sh', 'launcher_control.py', 'process_supervisor.py', 'network_env.sh', 'start_ray_node.sh', 'validate_cluster64.py']},
     'validation_scope': 'Frozen source/runtime and one actual 8-GPU GRPO step; not a 64-GPU training certificate.',
     'multi_node_training_verified': False,
 }

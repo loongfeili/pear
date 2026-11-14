@@ -19,14 +19,15 @@ class NodeProbe:
         self.rank = rank
         self.store = None
         self.ip = ray.util.get_node_ip_address()
-        records = json.loads(subprocess.check_output(['ip', '-j', '-4', 'addr', 'show', 'dev', 'eth1']))
+        interface = os.environ['PEAR_NETWORK_INTERFACE']
+        records = json.loads(subprocess.check_output(['ip', '-j', '-4', 'addr', 'show', 'dev', interface]))
         ips = [a['local'] for record in records for a in record['addr_info']
                if a['family'] == 'inet' and a['scope'] == 'global']
         assert ips == [self.ip], (ips, self.ip)
         assert ipaddress.ip_address(self.ip).version == 4
         assert os.environ.get('VLLM_HOST_IP') == self.ip, ('VLLM_HOST_IP', os.environ.get('VLLM_HOST_IP'), self.ip)
-        for key, value in [('NCCL_SOCKET_IFNAME', '=eth1'), ('NCCL_SOCKET_FAMILY', 'AF_INET'),
-                           ('GLOO_SOCKET_IFNAME', 'eth1'), ('PEAR64_RUNTIME_ENV_PROBE', '1')]:
+        for key, value in [('NCCL_SOCKET_IFNAME', '=' + interface), ('NCCL_SOCKET_FAMILY', 'AF_INET'),
+                           ('GLOO_SOCKET_IFNAME', interface), ('PEAR64_RUNTIME_ENV_PROBE', '1')]:
             assert os.environ.get(key) == value, (key, os.environ.get(key))
         assert torch.cuda.device_count() == 1
         torch.cuda.set_device(0)
@@ -81,8 +82,10 @@ def main():
         assert len(nodes) == 8, len(nodes)
         assert len({n['NodeManagerAddress'] for n in nodes}) == 8
         assert sum(n['Resources'].get('GPU', 0) for n in nodes) == 64
-        environment = {'PEAR64_RUNTIME_ENV_PROBE': '1', 'NCCL_SOCKET_IFNAME': '=eth1',
-                       'NCCL_SOCKET_FAMILY': 'AF_INET', 'GLOO_SOCKET_IFNAME': 'eth1'}
+        interface = os.environ.get('PEAR_NETWORK_INTERFACE', 'eth1')
+        environment = {'PEAR64_RUNTIME_ENV_PROBE': '1', 'PEAR_NETWORK_INTERFACE': interface,
+                       'NCCL_SOCKET_IFNAME': '=' + interface,
+                       'NCCL_SOCKET_FAMILY': 'AF_INET', 'GLOO_SOCKET_IFNAME': interface}
         for key in ('LD_LIBRARY_PATH', 'PEAR_CUDA_COMPAT_DIR'):
             if key in os.environ:
                 environment[key] = os.environ[key]

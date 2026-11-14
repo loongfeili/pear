@@ -26,7 +26,7 @@ def log(event, **kw):
         print(json.dumps({'time': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'event': event, **kw}), flush=True)
 
 def opener(direct=False):
-    return urllib.request.build_opener(urllib.request.ProxyHandler({} if direct else {'http': PROXY, 'https': PROXY}))
+    return urllib.request.build_opener(urllib.request.ProxyHandler({} if direct or not PROXY else {'http': PROXY, 'https': PROXY}))
 
 def digest(path, item):
     h = hashlib.sha256() if 'lfs' in item else hashlib.sha1()

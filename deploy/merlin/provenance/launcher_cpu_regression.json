@@ -1,0 +1,27 @@
+{
+  "scope": "Linux CPU launcher regression only; no training or GPU execution",
+  "tested_at": "2026-11-15T03:11:27.650570+08:00",
+  "platform": "linux",
+  "python": "3.11.2 (main, Apr 28 2025, 14:11:48) [GCC 12.2.0]",
+  "tests_passed": 18,
+  "tests_failed": 0,
+  "tests_skipped": 0,
+  "seconds": 6.851,
+  "command": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/merlin/tests -p 'test_*.py' -v",
+  "tested_sha256": {
+    "deploy/merlin/launcher_control.py": "639b5df826068b94a6190a631fba9052a05856a0bb2bba08297594a2cb566094",
+    "deploy/merlin/process_supervisor.py": "cd71d951c2defab8822158be1e1553c04d8efc308f49e3f61312c5a879c4ee37",
+    "deploy/merlin/tests/test_launcher_control.py": "0e787067e0ed08f40e75029f2c9cd03670ad639eab15a1d4d59f280497b6b0ff",
+    "deploy/merlin/tests/test_process_supervisor.py": "cb3a38bca2cfb01738ed0969eff00451f2d816f43025d0264ea55b855887dd39"
+  },
+  "source_manifest_check": {
+    "files": 837,
+    "sha256": "5b86568684edba9695883eefc3c3f64809c76b569de83a023ee6966b60191b0e"
+  },
+  "static_checks": {
+    "python_ast_files": 12,
+    "bash_syntax_files": 17,
+    "json_files_before_this_report": 7
+  },
+  "gpu_training_retested": false
+}
