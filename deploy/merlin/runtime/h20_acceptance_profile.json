@@ -1,0 +1,80 @@
+{
+  "profile": "h20_fla_reference_compat_v1",
+  "upstream_commit": "f32aa1f7c2ec9c3f45630cc9f8541b3201e8e087",
+  "cuda_source": "pear/models/qwen3_5/rollout/hopper/csrc/gdn_chunk.cu",
+  "cuda_source_sha256": "ad089ddfc5b1ca965a17f031e44f12bd8dd08bceb17db108107eda459b09dc85",
+  "expected_tests": [
+    "tests/test_training_environment_on_gpu.py::test_lmcache_imports_with_its_cuda_operators",
+    "tests/test_training_environment_on_gpu.py::test_the_environment_holds_every_trtllm_attention_kernel_flashinfer_lists",
+    "tests/test_training_environment_on_gpu.py::test_flash_attn_2_varlen_runs_forward_and_backward_at_the_actor_s_attention_shape",
+    "tests/models/test_qwen3_5_rollout_kernels_hopper_on_gpu.py::test_a_decode_step_matches_the_reference",
+    "tests/models/test_qwen3_5_rollout_kernels_hopper_on_gpu.py::test_a_mixed_step_matches_the_reference_eagerly_and_from_a_graph",
+    "tests/models/test_qwen3_5_rollout_kernels_hopper_on_gpu.py::test_the_chunk_kernels_equal_flas",
+    "tests/models/test_qwen3_5_rollout_kernels_hopper_on_gpu.py::test_the_split_decode_attention_matches_the_reference",
+    "tests/models/test_qwen3_5_rollout_kernels_hopper_on_gpu.py::test_the_decode_all_reduce_on_four_ranks",
+    "tests/models/test_qwen3_5_rollout_kernels_hopper_on_gpu.py::test_the_sampler_draws_from_the_softmax",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_fp16_operands_keep_the_bf16_weight_and_rerun_a_batch_out_of_range",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_the_range_flag_rises_for_a_value_past_fp16_s_range_under_the_mask",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_fp32_output_linear_on_hi_lo_operands",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_fused_norms_match_the_hf_norm_on_the_fp32_stream",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_gated_delta_net_kernels_are_closer_to_fp64_than_the_hf_mixer",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_the_hopper_delta_rule_backward_reuses_the_recompute_s_tensors",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_the_boundary_summary_s_transition_is_closer_to_fp64_than_fla_s",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_the_delta_rule_holds_no_memory_per_packing",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_the_summaries_of_a_padded_span_match_its_own_to_rounding_and_reuse_the_bucket_graphs",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_the_mlp_rounds_once_and_skips_the_down_projection_in_the_recompute",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_the_fused_head_matches_the_fp32_head_and_repeats_bit_for_bit",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_the_vision_attention_is_more_precise_than_tf32",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_blackwell_s_vision_attention_runs_the_family_s_forward_on_its_own_attention",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_the_vision_linears_are_more_precise_than_tf32",
+    "tests/models/test_qwen3_5_training_kernels_ulysses_on_gpu.py::test_the_mixers_under_ulysses_on_two_ranks",
+    "tests/models/test_qwen3_5_training_kernels_head_on_gpu.py::test_the_fp32_head_matches_fp64[False]",
+    "tests/models/test_qwen3_5_training_kernels_head_on_gpu.py::test_the_fp32_head_matches_fp64[True]",
+    "tests/models/test_qwen3_5_training_kernels_head_on_gpu.py::test_the_fp32_head_backward_repeats_bit_for_bit_when_a_label_is_in_the_head",
+    "tests/models/test_qwen3_5_training_kernels_head_on_gpu.py::test_the_qwen3_5_fused_forward_returns_the_labels_and_the_head_apart",
+    "tests/models/test_qwen3_5_training_kernels_head_on_gpu.py::test_the_fp32_head_of_an_fsdp_unit_reduces_its_gradient_on_two_ranks"
+  ],
+  "expected_skipped": [
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_the_delta_rule_holds_no_memory_per_packing",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_the_summaries_of_a_padded_span_match_its_own_to_rounding_and_reuse_the_bucket_graphs",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_the_vision_attention_is_more_precise_than_tf32",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py::test_blackwell_s_vision_attention_runs_the_family_s_forward_on_its_own_attention"
+  ],
+  "documented_exception": {
+    "test": "tests/models/test_qwen3_5_rollout_kernels_hopper_on_gpu.py::test_a_mixed_step_matches_the_reference_eagerly_and_from_a_graph",
+    "reason": "The fixed original H20 input produces the same fp64 outlier in the patched kernel and pinned FLA chunks followed by the same gated norm. This original assertion remains failed; acceptance requires fresh exact FLA, graph, finite-value and state-carry regressions.",
+    "fp64_rtol": 0.05,
+    "fp64_atol": 0.05,
+    "bad_coordinates": [
+      [
+        77,
+        0,
+        30
+      ]
+    ],
+    "actual": 0.9140625,
+    "reference": 1.1064301385699877
+  },
+  "scope": "H20 runtime/kernel compatibility for the pinned source and runtime. Preserve all original upstream outcomes; a separate actual GRPO gate and runtime/source certificate are required. This profile alone does not establish training success or paper metrics.",
+  "regression_plan_sha256": "feac80cbbc3e3d324dc4149b20afce00bade0e816cca86134896566c88ef23a6",
+  "regression_harness_sha256": "b15234f830b94e8330f42ee7f44e3d96aad6d535cac932f5c2753032a584f59e",
+  "strict_check_count": 458,
+  "exact_finite_check_count": 371,
+  "original_test_source_sha256": {
+    "tests/models/test_qwen3_5_rollout_kernels_hopper_on_gpu.py": "38effc8afe25ff17971757f8d746d6da56426e6dcd0b77a9748505506fdb3006",
+    "tests/models/test_qwen3_5_training_kernels_head_on_gpu.py": "3d1813f96c47d80ac885056bed19d32d7c65f6889c40fb8da991eeb206dae714",
+    "tests/models/test_qwen3_5_training_kernels_on_gpu.py": "7b0225984bd53afa8458c9ebd91acd1ce938b271cf71b17b666c6caed174d9be",
+    "tests/models/test_qwen3_5_training_kernels_ulysses_on_gpu.py": "a886a2ec3ae020ea27bd37d8d66ecadb8d5a89e7bae2c6263312f42da9428481",
+    "tests/test_training_environment_on_gpu.py": "82abf42ecc7186a2de66d3ad6801e468e61a399c241d1baa4d6b2762b551b61d"
+  },
+  "csrc_sha256": {
+    "ar_norm.cu": "5f459e556630c9665cf87123627ee73c0ed4c6f4060f0e9ba62306586a77987d",
+    "gdn_chunk.cu": "ad089ddfc5b1ca965a17f031e44f12bd8dd08bceb17db108107eda459b09dc85",
+    "gdn_decode.cu": "29143e14a250c569821d966d0e8d8861823c606ceb70c1278bde01f971a69532",
+    "library.cu": "121ad07eb646d395ed32277b4e7b01d41b7a6907b61d213fc076251d2a259f55",
+    "sampler.cu": "e9100889781d05fd5dd230f98590b73931798b6de3a712315ac1fc5f5316531c",
+    "split_attn.cu": "a63026c47c9d4eee7684e18e8ae7fc4e53879e14370682e95ccf1005f2a5617a",
+    "tensor_map.cuh": "70612b99a46d0d0e7a5372353d78448971a08ab734c1892ff833fd9f4b52dff7"
+  },
+  "expected_skip_reason": "BlackwellTrainingGpuBackend's kernels"
+}

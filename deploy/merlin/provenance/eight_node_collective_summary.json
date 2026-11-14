@@ -1,0 +1,57 @@
+{
+  "passed": true,
+  "all_gpu_slots_released": true,
+  "seconds": 24.71950737759471,
+  "checks": [
+    {
+      "rank": 0,
+      "nccl_sum": 36.0,
+      "gloo_sum": 36.0,
+      "runtime_env_verified": true
+    },
+    {
+      "rank": 1,
+      "nccl_sum": 36.0,
+      "gloo_sum": 36.0,
+      "runtime_env_verified": true
+    },
+    {
+      "rank": 2,
+      "nccl_sum": 36.0,
+      "gloo_sum": 36.0,
+      "runtime_env_verified": true
+    },
+    {
+      "rank": 3,
+      "nccl_sum": 36.0,
+      "gloo_sum": 36.0,
+      "runtime_env_verified": true
+    },
+    {
+      "rank": 4,
+      "nccl_sum": 36.0,
+      "gloo_sum": 36.0,
+      "runtime_env_verified": true
+    },
+    {
+      "rank": 5,
+      "nccl_sum": 36.0,
+      "gloo_sum": 36.0,
+      "runtime_env_verified": true
+    },
+    {
+      "rank": 6,
+      "nccl_sum": 36.0,
+      "gloo_sum": 36.0,
+      "runtime_env_verified": true
+    },
+    {
+      "rank": 7,
+      "nccl_sum": 36.0,
+      "gloo_sum": 36.0,
+      "runtime_env_verified": true
+    }
+  ],
+  "sample_time": "2026-11-15T02:38:45.714163",
+  "node_addresses_omitted": true
+}

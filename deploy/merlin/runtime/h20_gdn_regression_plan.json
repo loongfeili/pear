@@ -1,0 +1,187 @@
+{
+  "version": 1,
+  "per_tp4_rank_dims": {
+    "H": 4,
+    "HV": 12,
+    "K": 128,
+    "V": 128,
+    "TP": 4
+  },
+  "chunk_size": 64,
+  "full_mixed_graph_max_tokens": 1024,
+  "configured_batched_token_budget": 8192,
+  "cases": [
+    {
+      "name": "boundary_63",
+      "seed": 1063,
+      "lengths": [
+        1,
+        1,
+        63,
+        63,
+        37
+      ],
+      "decodes": 2,
+      "steps": 3,
+      "reset_steps": [
+        2
+      ]
+    },
+    {
+      "name": "boundary_64",
+      "seed": 1064,
+      "lengths": [
+        1,
+        1,
+        64,
+        64,
+        37
+      ],
+      "decodes": 2,
+      "steps": 3,
+      "reset_steps": [
+        2
+      ]
+    },
+    {
+      "name": "boundary_65",
+      "seed": 1065,
+      "lengths": [
+        1,
+        1,
+        65,
+        65,
+        37
+      ],
+      "decodes": 2,
+      "steps": 3,
+      "reset_steps": [
+        2
+      ]
+    },
+    {
+      "name": "boundary_127",
+      "seed": 1127,
+      "lengths": [
+        1,
+        1,
+        127,
+        127,
+        37
+      ],
+      "decodes": 2,
+      "steps": 3,
+      "reset_steps": [
+        2
+      ]
+    },
+    {
+      "name": "boundary_128",
+      "seed": 1128,
+      "lengths": [
+        1,
+        1,
+        128,
+        128,
+        37
+      ],
+      "decodes": 2,
+      "steps": 3,
+      "reset_steps": [
+        2
+      ]
+    },
+    {
+      "name": "boundary_129",
+      "seed": 1129,
+      "lengths": [
+        1,
+        1,
+        129,
+        129,
+        37
+      ],
+      "decodes": 2,
+      "steps": 3,
+      "reset_steps": [
+        2
+      ]
+    },
+    {
+      "name": "mixed_graph_ceiling_1024",
+      "seed": 21024,
+      "lengths": [
+        1,
+        1,
+        1022
+      ],
+      "decodes": 2,
+      "steps": 3,
+      "reset_steps": [
+        2
+      ]
+    },
+    {
+      "name": "prefill_1024_carry_16k_then_reset",
+      "seed": 31024,
+      "lengths": [
+        1024
+      ],
+      "decodes": 0,
+      "steps": 17,
+      "reset_steps": [
+        16
+      ]
+    },
+    {
+      "name": "mixed_prefill_4096",
+      "seed": 24096,
+      "lengths": [
+        1,
+        1,
+        4096,
+        65,
+        37
+      ],
+      "decodes": 2,
+      "steps": 3,
+      "reset_steps": [
+        2
+      ]
+    },
+    {
+      "name": "prefill_8192_carry_16k_then_reset",
+      "seed": 28192,
+      "lengths": [
+        8192
+      ],
+      "decodes": 0,
+      "steps": 3,
+      "reset_steps": [
+        2
+      ]
+    }
+  ],
+  "pinned_original_fixtures": {
+    "1": [
+      "seed1_original_inputs.pt",
+      "311c0d5f55954e5b6b00f6cf1d7b9291dc7dcd0315b7ead32008b562d1a902cc"
+    ],
+    "7": [
+      "seed7_original_inputs.pt",
+      "9455bb18106f2cb0dd67c668da91191abeb3602c2f647d1b338dc674386d5464"
+    ]
+  },
+  "expectations": [
+    "g_cum/w/u exact FLA equality",
+    "prefill output exact FLA equality",
+    "prefill final state exact FLA equality",
+    "graph/eager output and all state bitwise equality",
+    "graph padding zero",
+    "empty capture does not change state",
+    "state reset and carry"
+  ],
+  "original_tests": "Execute the unmodified seed1 mixed and seed7 chunk tests separately; retain every failure.",
+  "known_baseline": "Seed1 fp64 tolerance failure was shared by FLA chunks + the same gated norm; it remains a failed original assertion.",
+  "coverage_limit": "Single-GPU per-TP4-rank GDN numerics; not TP communication or complete model/GRPO certification."
+}

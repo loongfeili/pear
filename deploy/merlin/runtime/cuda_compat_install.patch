@@ -1,0 +1,18 @@
+diff --git a/scripts/install/common.sh b/scripts/install/common.sh
+--- a/scripts/install/common.sh
++++ b/scripts/install/common.sh
+@@ -46,6 +46,14 @@ export UV_PYTHON_PREFERENCE=only-managed UV_NO_CONFIG=1
+ # a login shell's compiler modules or Conda base stay out: the builds see the machine's own toolchain only
+ unset CC CXX FC F77 CMAKE_PREFIX_PATH CPATH LIBRARY_PATH LD_LIBRARY_PATH PYTHONPATH
+ unset CONDA_PREFIX CONDA_DEFAULT_ENV VIRTUAL_ENV
++# Opt-in, task-local forward-compatibility libraries, extracted without changing the host driver.
++if [ -n "${PEAR_CUDA_COMPAT_DIR:-}" ]; then
++  if [ ! -e "$PEAR_CUDA_COMPAT_DIR/libcuda.so.1" ]; then
++    echo "missing CUDA compatibility libcuda at $PEAR_CUDA_COMPAT_DIR" >&2
++    exit 1
++  fi
++  export LD_LIBRARY_PATH=$PEAR_CUDA_COMPAT_DIR
++fi
+ # micromamba, for what conda-forge has and PyPI lacks (the targets mesa, imagemagick and numactl)
+ MICROMAMBA=$ENVS/micromamba/bin/micromamba
+ export MAMBA_ROOT_PREFIX=$ENVS/micromamba/root

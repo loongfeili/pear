@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "steps": 1,
+  "finished": 12,
+  "judged": 6,
+  "executed_tool_calls": 33,
+  "grad_norm": 0.0,
+  "losses": {
+    "actor/pg_loss": 0.0,
+    "actor/loss": 0.0
+  },
+  "timings": {
+    "update_actor": 235.01983388140798,
+    "update_weights": 7.9187132231891155
+  },
+  "checkpoint_bytes": 328288681828,
+  "source": "5b86568684edba9695883eefc3c3f64809c76b569de83a023ee6966b60191b0e",
+  "runtime": "bcea5b8796c53e44030c7ce8127d254dd55d4200c01df085af17f5668192c9eb",
+  "certified_at": "2026-11-15T01:31:34.881919+08:00",
+  "helpers_match_local": true
+}
