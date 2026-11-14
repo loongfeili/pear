@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Reduced H20 Stage 1: 8 x 8 GPUs, 2 trainer nodes and 6 rollout nodes.
-# Reuse the frozen eight-GPU environment gate; this script does not certify 64-GPU training.
+# H20 Stage 1: either 8 x 8 GPUs (2 trainer/6 rollout) or 16 x 8 (4/12).
+# Reuse the frozen eight-GPU environment gate; it does not certify multi-node training.
 set -euo pipefail
 [[ ${PEAR_SUPERVISED:-} == 1 ]] || { echo "Use merlin_stage1_entry.sh" >&2; exit 2; }
 # Remove the idle NERO task's Python/source-check contamination only.
 unset PYTHONPATH EXPECTED_GIT_COMMIT
 
 ROOT=${PEAR_ROOT:?The owning controller must set PEAR_ROOT}
+LAUNCH=$(cd "$(dirname "$0")" && pwd -P)
+TOPOLOGY_ENV=$(python3 "$LAUNCH/topology.py" --shell)
+eval "$TOPOLOGY_ENV"
 RANK=${PEAR_NODE_RANK:-}
 HEAD_ADDRESS=
 LAUNCH_ID=
@@ -25,12 +28,12 @@ while [ "$#" -gt 0 ]; do
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-[[ "$RANK" =~ ^[0-9]+$ ]] && (( RANK < 8 )) || { echo 'Set --rank (or PEAR_NODE_RANK) explicitly to 0..7'; exit 2; }
+[[ "$RANK" =~ ^[0-9]+$ ]] && (( 10#$RANK < PEAR_NNODES )) || { echo "Set --rank (or PEAR_NODE_RANK) to 0..$((PEAR_NNODES - 1))"; exit 2; }
+RANK=$((10#$RANK))
 [[ "$HEAD_ADDRESS" =~ ^[^:[:space:]]+:[0-9]+$ ]] || { echo '--head-address must be an explicit IPv4-or-hostname:port'; exit 2; }
 [[ "$LAUNCH_ID" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo '--launch-id is required; use a NEW value for each cluster launch'; exit 2; }
 [[ "$STEPS" =~ ^[1-9][0-9]*$ ]] && [[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || exit 2
 command -v setsid >/dev/null
-LAUNCH=$(cd "$(dirname "$0")" && pwd)
 export PEAR_ROOT=$ROOT
 source "$LAUNCH/network_env.sh"
 BASELINE_LAUNCH=$ROOT/launch
@@ -47,7 +50,7 @@ export VERL_ENV LIBERO_MESA_DIR
 export LIBERO_PYTHON=$LIBERO_ENV/bin/python LIBERO_CONFIG_PATH=$LIBERO_ENV/etc/libero
 export RUN=${PEAR_RUN:?The owning controller must select and lock RUN}
 export MODEL=${MODEL:-$WORK_DIR/models/Qwen3.8-27B}
-export GPU=h100 TRAINER_NNODES=2 ROLLOUT_NNODES=6 STEPS
+export GPU=h100 STEPS
 # Keep the reviewed full Stage 1 algorithm sizes; no smoke overrides leak in.
 export BATCH=128 N=8 TP=4 MAX_PROMPT=4096 MAX_RESPONSE=160000 SESSIONS_PER_REPLICA=64
 export EPOCHS=100
@@ -70,13 +73,23 @@ PY
 
 CONTROL=$ROOT/launches/$LAUNCH_ID
 mkdir -p "$CONTROL/logs" "$LOCAL_DIR"
-RAY_PID= TRAIN_PID= FINISHED=0
+RAY_PID= TRAIN_PID= TRACKING_PID= FINISHED=0
 fail() { printf '%s rank=%s %s\n' "$(date -u +%FT%TZ)" "$RANK" "$*" > "$CONTROL/failure.$RANK"; echo "$*" >&2; exit 1; }
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
   if [[ "$FINISHED" != 1 && ! -f "$CONTROL/failure.$RANK" ]]; then
     printf 'rank=%s exited status=%s\n' "$RANK" "$status" > "$CONTROL/failure.$RANK"
+  fi
+  if [[ -n "$TRACKING_PID" ]]; then
+    # Give the independent metrics bridge a bounded opportunity to drain JSONL
+    # and finish its SDK Run. Its failure never changes the training exit code.
+    printf '{"exit_code":%s}\n' "$status" > "$CONTROL/tracking.stop.json.partial" &&
+      mv "$CONTROL/tracking.stop.json.partial" "$CONTROL/tracking.stop.json" || true
+    for (( attempt = 0; attempt < 350; attempt++ )); do
+      kill -0 "$TRACKING_PID" 2>/dev/null || break
+      sleep 0.1
+    done
   fi
   # The outer Linux subreaper owns the complete process tree, including orphaned
   # and setsid descendants. It performs verified cleanup even after leaders exit.
@@ -85,6 +98,14 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+if (( RANK == 0 )) && [[ ${PEAR_TRACKING_ENABLED:-0} == 1 ]]; then
+  # Use the image's byted-wandb, not the frozen training venv's official wandb.
+  env -u PYTHONPATH "${PEAR_TRACKING_PYTHON:?Set the image Python for Tracking}" \
+    "$LAUNCH/tracking_bridge.py" --run "$RUN" --control "$CONTROL" \
+    --launch-id "$LAUNCH_ID" --project "${PEAR_TRACKING_PROJECT:-pear-h20}" \
+    > "$CONTROL/logs/tracking.log" 2>&1 &
+  TRACKING_PID=$!
+fi
 check_failure() {
   local files=("$CONTROL"/failure.*)
   [[ ! -e "${files[0]}" ]] || fail "Another node failed; inspect $CONTROL/failure.*"
@@ -104,16 +125,20 @@ wait_file() {
 python3 "$HELPER" --root "$ROOT" --model-dir "$MODEL" > "$CONTROL/logs/preflight.$RANK.json" 2> "$CONTROL/logs/preflight.$RANK.err" || fail 'Node/environment preflight failed; see per-rank log'
 # The original certificate deliberately retains candidate.nodes=32. It proves
 # the frozen runtime/source and eight-GPU functional run, not this topology.
-printf 'BASELINE_ENVIRONMENT_GATE_PASSED rank=%s scope=eight_gpu_functional_test requested_topology=8x8\n' "$RANK"
+printf 'BASELINE_ENVIRONMENT_GATE_PASSED rank=%s scope=eight_gpu_functional_test requested_topology=%sx8\n' "$RANK" "$PEAR_NNODES"
 if (( RANK == 0 )); then
   python3 - "$ROOT" "$LAUNCH" "$CONTROL" <<'PYCONFIG'
-import hashlib, json, pathlib, sys
+import hashlib, json, os, pathlib, sys
 root, launch, control = map(pathlib.Path, sys.argv[1:])
+sys.path.insert(0, str(launch))
+from topology import topology_from_environment
+topology = topology_from_environment()
 certificate = root / 'work_dir/stage1_environment_ready.json'
 saved = json.loads(certificate.read_text())
 record = {
-    'record_type': 'stage1_64_launch_configuration',
-    'requested_topology': {'nodes': 8, 'gpus_per_node': 8, 'trainer_nodes': 2, 'rollout_nodes': 6},
+    'record_type': 'stage1_launch_configuration',
+    'requested_topology': topology.as_dict(),
+    'deployment_commit': os.environ.get('PEAR_DEPLOY_COMMIT'),
     'algorithm': {'batch_groups': 128, 'rollouts_per_group': 8, 'tp': 4, 'fsdp_size': 8, 'sp': 8,
                   'max_prompt_tokens': 4096, 'max_response_tokens': 160000, 'sessions_per_replica': 64},
     'baseline_certificate_path': str(certificate),
@@ -121,15 +146,15 @@ record = {
     'baseline_candidate_record_unchanged': saved['candidate'],
     'source_sha256': saved['source_sha256'], 'runtime_bundle_sha256': saved['runtime_bundle']['sha256'],
     'launcher_sha256': {name: hashlib.sha256((launch / name).read_bytes()).hexdigest()
-                       for name in ['stage1_node.sh', 'merlin_stage1_entry.sh', 'worker_entry.sh', 'launcher_control.py', 'process_supervisor.py', 'network_env.sh', 'start_ray_node.sh', 'validate_cluster64.py']},
-    'validation_scope': 'Frozen source/runtime and one actual 8-GPU GRPO step; not a 64-GPU training certificate.',
+                       for name in ['stage1_node.sh', 'merlin_stage1_entry.sh', 'worker_entry.sh', 'launcher_control.py', 'process_supervisor.py', 'network_env.sh', 'start_ray_node.sh', 'validate_cluster64.py', 'topology.py', 'job_entrypoint.sh', 'tracking_bridge.py']},
+    'validation_scope': 'Frozen source/runtime and one actual 8-GPU GRPO step; not a multi-node training certificate.',
     'multi_node_training_verified': False,
 }
-(control / 'deployment64.json').write_text(json.dumps(record, indent=2) + '\n')
+(control / f'deployment{topology.total_gpus}.json').write_text(json.dumps(record, indent=2) + '\n')
 PYCONFIG
 fi
 printf 'ready\n' > "$CONTROL/preflight.$RANK"
-for rank in $(seq 0 7); do wait_file "$CONTROL/preflight.$rank"; done
+for (( rank = 0; rank < PEAR_NNODES; rank++ )); do wait_file "$CONTROL/preflight.$rank"; done
 # Ray adds a timestamped session and socket name: the longer LOCAL_DIR is for
 # compilation caches only. Every invocation gets its own short owner-only path.
 RAY_TMPDIR=$(mktemp -d /var/tmp/pray.XXXXXX)
@@ -147,7 +172,7 @@ assert size <= 107, f"Ray AF_UNIX socket path bound {size} exceeds 107 bytes"
 print(f"RAY_SOCKET_PATH_BOUND bytes={size} limit=107 temp_dir={path}", flush=True)
 PY
 ROLE=rollout
-(( RANK >= 2 )) || ROLE=trainer
+(( RANK >= TRAINER_NNODES )) || ROLE=trainer
 cd "$REPO"
 if (( RANK == 0 )); then
   setsid bash "$LAUNCH/start_ray_node.sh" "$ROLE" > "$CONTROL/logs/ray.$RANK.log" 2>&1 &
@@ -168,26 +193,29 @@ fi
 
 if (( RANK == 0 )); then
   start=$SECONDS
-  while ! "$VERL_ENV/bin/python" - "$HEAD_ADDRESS" > "$CONTROL/logs/cluster.json" 2>&1 <<'PY'
+  while ! "$VERL_ENV/bin/python" - "$HEAD_ADDRESS" "$LAUNCH" > "$CONTROL/logs/cluster.json" 2>&1 <<'PY'
 import json, ray, sys
+sys.path.insert(0, sys.argv[2])
+from topology import topology_from_environment
+topology = topology_from_environment()
 ray.init(address=sys.argv[1], log_to_driver=False)
 nodes=[n for n in ray.nodes() if n['Alive']]
 resources=ray.cluster_resources()
-print(json.dumps({'alive_nodes':len(nodes),'resources':resources}, sort_keys=True))
-ok=(len(nodes)==8 and resources.get('trainer')==16 and resources.get('rollout')==48 and resources.get('GPU')==64 and resources.get('libero')==96)
+errors = topology.resource_errors(nodes, resources)
+print(json.dumps({'alive_nodes':len(nodes),'resources':resources,'errors':errors}, sort_keys=True))
 ray.shutdown()
-sys.exit(0 if ok else 1)
+sys.exit(1 if errors else 0)
 PY
   do
     check_failure
-    (( SECONDS - start < TIMEOUT )) || fail 'Expected 8 nodes / 64 GPU / 16 trainer / 48 rollout / 96 libero resources not ready'
+    (( SECONDS - start < TIMEOUT )) || fail "Expected $PEAR_NNODES nodes / $PEAR_TOTAL_GPUS GPUs with $TRAINER_NNODES trainer and $ROLLOUT_NNODES rollout nodes; see cluster.json"
     sleep 5
   done
   check_failure
   # This separately reviewed validation releases its per-node GPU actors before
   # training; a runtime certificate alone does not validate cross-node transport.
-  "$VERL_ENV/bin/python" "$LAUNCH/validate_cluster64.py" --address "$HEAD_ADDRESS" \
-    > "$CONTROL/logs/cluster_validation.json" 2>&1 || fail '64-GPU cluster network/collective validation failed'
+  "$VERL_ENV/bin/python" "$LAUNCH/validate_cluster64.py" --address "$HEAD_ADDRESS" --gpus "$PEAR_TOTAL_GPUS" \
+    > "$CONTROL/logs/cluster_validation.json" 2>&1 || fail "$PEAR_TOTAL_GPUS-GPU cluster network/collective validation failed"
   check_failure
   # Reduced node count and host-cache capacity are deployment differences. Keep
   # context, batch, group size, FSDP8/SP8, TP4 and algorithm at upstream Stage 1 values.

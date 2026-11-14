@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Invoke only on the eight GPU worker pods; leave the separate CPU head idle.
+# Invoke only on the selected GPU worker pods; leave the separate CPU head idle.
 # GPU worker rank 0 is the Ray head. No Robust restart.
 set -euo pipefail
 [[ ${PEAR_SUPERVISED:-} == 1 ]] || { echo "Use merlin_stage1_entry.sh, not this internal worker entry" >&2; exit 2; }
@@ -9,15 +9,17 @@ umask 077
 
 ROOT=${PEAR_ROOT:?The owning controller must set PEAR_ROOT}
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
-RANK=${ARNOLD_ID:?ARNOLD_ID must identify this worker (0..7)}
+TOPOLOGY_ENV=$(python3 "$SCRIPT_DIR/topology.py" --shell)
+eval "$TOPOLOGY_ENV"
+RANK=${ARNOLD_ID:?ARNOLD_ID must identify this worker}
 TRIAL_ID=${ARNOLD_TRIAL_ID:?ARNOLD_TRIAL_ID is required}
 [[ ${ARNOLD_ROLE:-} == worker ]] || { echo 'Expected ARNOLD_ROLE=worker' >&2; exit 2; }
-[[ "$RANK" =~ ^[0-9]+$ ]] && (( 10#$RANK < 8 )) || { echo 'ARNOLD_ID must be 0..7' >&2; exit 2; }
+[[ "$RANK" =~ ^[0-9]+$ ]] && (( 10#$RANK < PEAR_NNODES )) || { echo "ARNOLD_ID must be 0..$((PEAR_NNODES - 1))" >&2; exit 2; }
 [[ "$TRIAL_ID" =~ ^[0-9]+$ ]] || { echo 'ARNOLD_TRIAL_ID must be numeric' >&2; exit 2; }
 RANK=$((10#$RANK))
 export PEAR_ROOT=$ROOT
 source "$SCRIPT_DIR/network_env.sh"
-LAUNCH_ID=${PEAR_LAUNCH_ID:-merlin-trial-${TRIAL_ID}-stage1-64}
+LAUNCH_ID=${PEAR_LAUNCH_ID:-merlin-trial-${TRIAL_ID}-stage1-${PEAR_TOTAL_GPUS}}
 [[ "$LAUNCH_ID" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo 'PEAR_LAUNCH_ID must contain only letters, digits, underscore or hyphen' >&2; exit 2; }
 CONTROL=$ROOT/launches/$LAUNCH_ID
 SHARED_CONTROL=$CONTROL/sharedcontrol
@@ -115,7 +117,7 @@ print(f"{ip}:{port}")
 PY
 ) || fail 'Published head address/token validation failed'
 
-printf 'PEAR_STAGE1_64_WORKER rank=%s trial=%s head=%s\n' "$RANK" "$TRIAL_ID" "$HEAD_ADDRESS"
+printf 'PEAR_STAGE1_WORKER gpus=%s nodes=%s rank=%s trial=%s head=%s\n' "$PEAR_TOTAL_GPUS" "$PEAR_NNODES" "$RANK" "$TRIAL_ID" "$HEAD_ADDRESS"
 exec bash "$SCRIPT_DIR/stage1_node.sh" \
   --root "$ROOT" \
   --rank "$RANK" \

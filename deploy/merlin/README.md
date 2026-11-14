@@ -1,8 +1,9 @@
-# H20 deployment record and 64-GPU launcher
+# H20 deployment record and 64/128-GPU launchers
 
-Training is paused. This directory versions the actual deployment adaptations,
-the preparation/validation tools, and the subsequent launcher fixes. Publishing
-these files does not submit a job or restart the existing allocation.
+This directory versions the actual deployment adaptations, preparation and
+validation tools, ownership fixes, and an automatic 128-GPU job entry point.
+The platform job must explicitly select the published Git commit and GPU count.
+The previous 64-GPU allocation is separate from a newly submitted 128-GPU job.
 
 ## Source history and validation scope
 
@@ -21,7 +22,8 @@ these files does not submit a job or restart the existing allocation.
   They are not a portable, one-command environment installer.
 - `provenance/*.sh.snapshot` are historical **32-node** launch scripts, retained
   only as evidence. They are not active entry points. The active launcher here
-  supports eight GPU workers (64 GPUs), with two trainer and six rollout nodes.
+  supports 64 GPUs (eight nodes, two trainer/six rollout) and 128 GPUs
+  (sixteen nodes, four trainer/twelve rollout), selected by `PEAR_TOTAL_GPUS`.
 - The upstream veRL and LMCache patch series are already in `3rdparty/`; this
   change adds no new commits to those dependency repositories or internal SCM
   repositories. Runtime archives, model weights, checkpoints, authentication
@@ -64,16 +66,30 @@ Do not manually remove a retained lock until all processes for its recorded
 owner have been checked and stopped on every worker. A new launch ID alone does
 not override a retained RUN/node lock.
 
-## Configuration for a later authorized launch
+## Job entry point and configuration
 
-Supply the same `PEAR_ROOT`, `PEAR_LAUNCH_ID`, `PEAR_RUN` (if set), and
-`PEAR_RESUME` on all eight worker pods. Merlin supplies `ARNOLD_ROLE=worker`,
-`ARNOLD_ID=0..7` and `ARNOLD_TRIAL_ID`. Leave the separate CPU head idle.
+The platform entry invokes `job_entrypoint.sh` from an immutable NAS release.
+It verifies every file against `release.json` and the configured commit, starts
+the owning launcher once, records its exit status, and finishes with
+`exec sleep infinity`. Both successful completion and training failure retain
+the allocation for inspection; the platform's `running` state alone therefore
+does not prove training is active. There is no automatic retry or lock removal.
+An outer `sleep infinity` in the job configuration also covers bootstrap failures.
+
+Supply the same `PEAR_ROOT`, `PEAR_TOTAL_GPUS`, `PEAR_DEPLOY_COMMIT`,
+`PEAR_LAUNCH_ID`, `PEAR_RUN` (if set), and `PEAR_RESUME` on all worker pods.
+Merlin supplies `ARNOLD_ROLE=worker`, `ARNOLD_ID=0..15` for 128 GPUs and
+`ARNOLD_TRIAL_ID`. The new 128-GPU job needs no separate CPU head.
+
+The platform wrapper defaults to 128 GPUs; the lower-level direct launcher
+defaults to 64 for compatibility. Production job configuration sets 128 explicitly.
 
 | Variable | Meaning |
 | --- | --- |
+| `PEAR_TOTAL_GPUS` | `64` or `128`; topology, barriers and collective validation use the same selector |
+| `PEAR_DEPLOY_COMMIT` | Exact 40-character Git commit of the published NAS release |
 | `PEAR_ROOT` | Existing shared deployment root; defaults to the recorded NAS root in the scripts |
-| `PEAR_LAUNCH_ID` | Unique attempt ID; defaults to `merlin-trial-${ARNOLD_TRIAL_ID}-stage1-64` |
+| `PEAR_LAUNCH_ID` | Unique attempt ID; the platform wrapper uses `merlin-trial-${ARNOLD_TRIAL_ID}-stage1-${PEAR_TOTAL_GPUS}-v1` |
 | `PEAR_RUN` | Defaults to `${PEAR_ROOT}/work_dir/runs/${PEAR_LAUNCH_ID}` |
 | `PEAR_RESUME` | `0` by default; `1` requires an explicit RUN and a new launch ID |
 | `PEAR_NODE_LOCK` | Defaults to `/var/tmp/pear-merlin-$(id -u).active`; keep identical across attempts on a node |
@@ -85,7 +101,9 @@ The launcher does not perform GPU scheduling or choose a resource queue.
 
 The existing NAS `$PEAR_ROOT/launch` is a **frozen validation input**, including
 `restore_runtime.sh`, `preflight_stage1.py` and the original helper hashes.
-Run a future launcher from its separate checkout. Do not overwrite the frozen
+Run the launcher from its separate fixed-commit release. Training uses the frozen
+`$PEAR_ROOT/repo` tree whose original 837-file hash must match the recorded source
+identity; no training-source change is introduced by the topology/entrypoint update. Do not overwrite the frozen
 helpers or rewrite the old certificate to make it cover this new launcher.
 The original 837-file source manifest and the independently recorded launcher
 hashes intentionally have separate scopes.
@@ -104,3 +122,18 @@ PyTorch or CUDA, start training, or submit a task. They cover duplicate claims,
 RUN contention/resume, cleanup acknowledgements, orphaned and detached children,
 signal delivery, and preservation of unrelated processes. Non-Linux runs skip
 these tests and must not be reported as Linux validation.
+
+## Progress and Tracking
+
+The controller writes failure/cleanup records under
+`$PEAR_ROOT/launches/$PEAR_LAUNCH_ID`. Per-node bootstrap logs and final exit
+status are under `$PEAR_ROOT/entrypoints/$PEAR_LAUNCH_ID`. `logs/training.log`
+and `$PEAR_RUN/train.log` contain driver output; `progress.json` contains
+trajectory/group counts and the trainer phase; `metrics_*.jsonl` and
+`tensorboard/` contain training metrics; `ckpt/` contains checkpoints.
+
+The image's separate system Python runs `tracking_bridge.py` on rank zero. It
+uses byted-wandb to mirror real JSONL metrics to the internal Tracking service,
+without changing the validated training environment's official wandb package.
+The true SDK URL is recorded in `tracking.json`; no training Run is fabricated
+while a job is waiting in the scheduler. See `TRACKING.md` for bridge details.
