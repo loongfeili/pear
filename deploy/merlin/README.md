@@ -177,3 +177,36 @@ The launcher propagates the plugin, its fixed-release Python path and the same
 launch ID through Ray runtime_env. CPU regressions exercise real concurrent
 processes and delayed socket binding; a separate actual-runtime check loads the
 veRL external hook and creates two real CPU TCPStores with successful round trips.
+
+
+## Storage outage and explicit live recovery
+
+The supervisor keeps a private authoritative journal under `/var/tmp/pear-owner-*`.
+Its shared state includes `local_state_path`. NAS mirroring errors are recorded
+locally and reported without abandoning the process tree. Even failure of both
+recording locations cannot bypass identity-checked cleanup signals; inability
+to persist final cleanup evidence still retains the launch locks.
+
+`recover_owned_launch.py` is an explicit operator recovery tool for a launch
+whose original supervisor died. It refuses a live original supervisor, a stop
+already requested, another host/rank/UID, or a changed PID birth identity. It
+starts no GPU training command. Existing processes are monitored using the
+original identity records and invocation markers; new CPU helpers are children
+of a new subreaper. Existing PID-1 orphans cannot be reparented for kernel
+reaping, so the tool never certifies original launch cleanup or releases the
+original RUN/node locks. Those locks require a later operator audit.
+
+With `--outputs <HDFS-mount-directory>`, recovery records, progress output,
+Tracking state and new diagnostic logs go to HDFS. Tracking resumes the same
+SDK ID and reads the original unmodified metric stream. Its SDK binary queue
+uses private local scratch. Checkpoints use an HDFS directory when the current
+checkpoint directory is absent or empty. Existing open legacy log/metric file
+descriptors cannot be rerouted by replacing a pathname: they remain live and
+are mirrored byte-for-byte to HDFS. The tool does not silently claim these old
+file descriptors stopped writing NAS. This preserves live sampling instead of
+restarting GPU actors merely to relocate their descriptors.
+
+`reroute_agent_logs.py` changes only diagnostic references on authenticated
+existing async agent-loop actors. It verifies trial, launch, actor class and
+filenames first, uses per-host directories to avoid PID collisions, and leaves
+policy parameters, rewards, sampling and episode state untouched.

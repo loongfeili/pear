@@ -16,6 +16,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -99,6 +100,10 @@ class _Supervisor:
         descriptor = os.open(self.state_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         os.close(descriptor)
         self.events_path = self.directory / 'process_events.jsonl'
+        self.local_directory = Path(tempfile.mkdtemp(prefix=f'pear-owner-{self.uid}-{self.owner}-', dir='/var/tmp'))
+        self.local_state_path = self.local_directory / 'process_supervisor.json'
+        self.mirror_error = None
+        self.last_mirror_warning = 0.0
         self.last_report = 0.0
 
     def discover(self):
@@ -168,20 +173,44 @@ class _Supervisor:
             'requested_signal': self.requested_signal,
             'owned_processes_seen': [asdict(identity) for identity in self.seen.values()],
             'current_processes': [asdict(info) for info in current.values()],
+            'local_state_path': str(self.local_state_path),
+            'nas_mirror_error': self.mirror_error,
             **extra,
         }
-        temporary = self.directory / f'.process_supervisor.{self.owner}.tmp'
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, 'w') as stream:
-            json.dump(state, stream, indent=2)
-            stream.write('\n')
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, self.state_path)
-        # No command line or environment contents are persisted.
-        descriptor = os.open(self.events_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(descriptor, 'a') as stream:
-            stream.write(json.dumps({'time': state['updated_at'], 'phase': phase, **extra}) + '\n')
+        def write_state(path):
+            temporary = path.with_name('.' + path.name + '.' + self.owner + '.tmp')
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, 'w') as stream:
+                json.dump(state, stream, indent=2)
+                stream.write('\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+
+        # A NAS quota error must not strand the live process tree. The private
+        # local journal is authoritative; the shared copy remains discoverable
+        # and explicitly reports its local journal path before any outage.
+        write_state(self.local_state_path)
+        try:
+            write_state(self.state_path)
+            # No command line or environment contents are persisted.
+            descriptor = os.open(self.events_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(descriptor, 'a') as stream:
+                stream.write(json.dumps({'time': state['updated_at'], 'phase': phase, **extra}) + '\n')
+            if self.mirror_error is not None:
+                self.mirror_error = None
+                state['nas_mirror_error'] = None
+                write_state(self.local_state_path)
+        except OSError as error:
+            self.mirror_error = {'errno': error.errno, 'time': time.time()}
+            state['nas_mirror_error'] = self.mirror_error
+            write_state(self.local_state_path)
+            if time.monotonic() - self.last_mirror_warning >= 30:
+                try:
+                    print(f'PEAR_OWNER_NAS_MIRROR_FAILED errno={error.errno} local_state={self.local_state_path}', file=sys.stderr, flush=True)
+                except OSError:
+                    pass  # stderr may itself be on the quota-exhausted NAS.
+                self.last_mirror_warning = time.monotonic()
         self.last_report = time.monotonic()
 
     def send(self, identity, sig):
@@ -216,7 +245,14 @@ class _Supervisor:
                 pass
 
     def cleanup(self):
-        self.record('terminating')
+        def record_cleanup(phase, **extra):
+            try:
+                self.record(phase, **extra)
+                return True
+            except OSError:
+                return False  # Signaling must still run if even local storage fails.
+
+        record_cleanup('terminating')
         for sig, grace in ((signal.SIGTERM, self.term_grace), (signal.SIGKILL, self.kill_grace)):
             deadline = time.monotonic() + grace
             signaled = set()
@@ -224,7 +260,8 @@ class _Supervisor:
                 self.reap()
                 current = self.discover()
                 if not current and not self.has_kernel_children():
-                    self.record('cleaned', cleanup_complete=True)
+                    if not record_cleanup('cleaned', cleanup_complete=True):
+                        raise CleanupError('Process tree is empty but cleanup evidence could not be persisted')
                     return
                 live = {pid: info for pid, info in current.items() if info.state != 'Z'}
                 for info in live.values():
@@ -238,10 +275,11 @@ class _Supervisor:
         remaining = self.discover()
         kernel_children = self.has_kernel_children()
         if not remaining and not kernel_children:
-            self.record('cleaned', cleanup_complete=True)
+            if not record_cleanup('cleaned', cleanup_complete=True):
+                raise CleanupError('Process tree is empty but cleanup evidence could not be persisted')
             return
-        self.record('cleanup_failed', cleanup_complete=False, remaining_pids=sorted(remaining),
-                    kernel_children_pending=kernel_children)
+        record_cleanup('cleanup_failed', cleanup_complete=False, remaining_pids=sorted(remaining),
+                       kernel_children_pending=kernel_children)
         raise CleanupError(f'Owned launch processes remain after SIGKILL: {sorted(remaining)}')
 
 

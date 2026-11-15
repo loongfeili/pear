@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -161,6 +162,68 @@ while True: time.sleep(1)
     def test_missing_command_returns_clean_127(self):
         process, directory = self.launch(command=[str(self.root / 'does-not-exist')])
         self.assert_finished_cleanly(process, directory, 127)
+
+    def test_nas_quota_failure_keeps_local_journal_and_cleans_children(self):
+        directory = self.root / 'quota-owner'
+        ready = self.root / 'quota-child.json'
+        child = f'''
+import json, os, pathlib, signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+raw = pathlib.Path('/proc/self/stat').read_text()
+pathlib.Path({str(ready)!r}).write_text(json.dumps({{'pid': os.getpid(), 'start_ticks': int(raw[raw.rfind(')')+2:].split()[19])}}))
+while True: time.sleep(1)
+'''
+        body = f'''
+real_open = module.os.open
+def quota_open(path, *args, **kwargs):
+    if str(path).startswith({str(directory)!r} + '/') and pathlib.Path(path).name.startswith('.process_supervisor'):
+        raise OSError(122, 'Injected NAS disk quota exceeded')
+    return real_open(path, *args, **kwargs)
+module.os.open = quota_open
+raise SystemExit(module.supervise([sys.executable, '-c', {child!r}], None, {str(directory)!r}, term_grace=0.1, kill_grace=2))
+'''
+        process, _ = self.launch_api(body, directory)
+        identity = self.wait_file(ready, process)
+        self.fixture_identities.append(identity)
+        process.terminate()
+        _, stderr = process.communicate(timeout=12)
+        self.assertEqual(process.returncode, 143, stderr)
+        match = re.search(r'local_state=(\S+)', stderr)
+        self.assertIsNotNone(match, stderr)
+        local = Path(match.group(1))
+        state = json.loads(local.read_text())
+        self.assertEqual(state['phase'], 'finished')
+        self.assertTrue(state['cleanup_complete'])
+        self.assertEqual(state['current_processes'], [])
+        self.assertEqual(state['nas_mirror_error']['errno'], 122)
+        self.assertFalse(same_process_alive(identity))
+
+    def test_recording_failure_cannot_skip_cleanup_signals(self):
+        directory = self.root / 'all-storage-failed-owner'
+        ready = self.root / 'all-storage-failed-child.json'
+        child = f'''
+import json, os, pathlib, signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+raw = pathlib.Path('/proc/self/stat').read_text()
+pathlib.Path({str(ready)!r}).write_text(json.dumps({{'pid': os.getpid(), 'start_ticks': int(raw[raw.rfind(')')+2:].split()[19])}}))
+while True: time.sleep(1)
+'''
+        body = f'''
+real_record = module._Supervisor.record
+def failed_record(self, phase, **extra):
+    if pathlib.Path({str(ready)!r}).exists():
+        raise OSError(5, 'Injected loss of all recording storage')
+    return real_record(self, phase, **extra)
+module._Supervisor.record = failed_record
+module.supervise([sys.executable, '-c', {child!r}], None, {str(directory)!r}, term_grace=0.1, kill_grace=2)
+'''
+        process, _ = self.launch_api(body, directory)
+        identity = self.wait_file(ready, process)
+        self.fixture_identities.append(identity)
+        _, stderr = process.communicate(timeout=12)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn('cleanup evidence could not be persisted', stderr)
+        self.assertFalse(same_process_alive(identity), 'A failed record prevented signaling the owned process')
 
     def launch_api(self, body, directory):
         """Exercise the API in its own process, never in the test runner."""
