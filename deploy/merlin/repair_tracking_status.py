@@ -35,9 +35,17 @@ def restore_status(client, expected):
     client.update_run_heartbeat_time(expected['project_id'], expected['run_id'])
     if before['Status'] == 'crashed':
         client.update_run_status(expected['project_id'], expected['run_id'], 'running')
-    after = get()  # SDK wrappers can swallow errors; require actual server readback.
-    if after['Status'] != 'running':
-        raise RuntimeError('Tracking status repair was not acknowledged')
+    # Status reads can briefly lag an acknowledged write. SDK wrappers also
+    # swallow errors, so require a bounded server readback rather than trusting
+    # the update call's return value.
+    deadline = time.monotonic() + 30
+    while True:
+        after = get()
+        if after['Status'] == 'running':
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Tracking status repair was not acknowledged')
+        time.sleep(1)
     return {'before': {k: before.get(k) for k in ('Status', 'Step', 'Runtime', 'UpdateTime')},
             'after': {k: after.get(k) for k in ('Status', 'Step', 'Runtime', 'UpdateTime')},
             'scalar_points_written': 0}

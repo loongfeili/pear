@@ -227,5 +227,5 @@ Use the image Python, the actual recovered HDFS control directory, and its
 rank-0 recovery directory. Save the repair utility in a new fixed-commit HDFS
 release; do not edit an existing release or restart the GPU training to fix a
 Tracking label. The utility writes its before/after audit to HDFS
-`control/tracking_status_repair.json`. Its six CPU tests cover wrong association,
+`control/tracking_status_repair.json`. Its seven CPU tests cover delayed server readback, wrong association,
 failed lookups, terminal states and SDK errors swallowed before readback.

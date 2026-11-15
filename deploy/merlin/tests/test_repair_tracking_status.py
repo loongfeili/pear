@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 DEPLOY = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(DEPLOY))
@@ -50,7 +51,16 @@ class StatusRepairTests(unittest.TestCase):
 
     def test_swallowed_sdk_update_error_is_detected_by_readback(self):
         self.client.update_run_status = lambda *args: None
-        with self.assertRaises(RuntimeError): m.restore_status(self.client, self.expected)
+        with patch.object(m.time, 'monotonic', side_effect=[0, 30]):
+            with self.assertRaises(RuntimeError): m.restore_status(self.client, self.expected)
+
+    def test_stale_read_after_update_is_retried_until_server_acknowledges(self):
+        before = dict(self.run)
+        after = dict(self.run, Status='running')
+        with patch.object(self.client, 'get_run', side_effect=[before, before, after]), patch.object(m.time, 'sleep') as sleep, patch.object(m.time, 'monotonic', side_effect=[0, 1]):
+            report = m.restore_status(self.client, self.expected)
+        self.assertEqual(report['after']['Status'], 'running')
+        sleep.assert_called_once_with(1)
 
     def test_running_run_does_not_receive_a_status_write(self):
         self.run['Status'] = 'running'
