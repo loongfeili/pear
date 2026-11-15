@@ -229,3 +229,21 @@ release; do not edit an existing release or restart the GPU training to fix a
 Tracking label. The utility writes its before/after audit to HDFS
 `control/tracking_status_repair.json`. Its seven CPU tests cover delayed server readback, wrong association,
 failed lookups, terminal states and SDK errors swallowed before readback.
+
+
+### CPU progress panel and inherited HTTP proxies
+
+Recovery unsets HTTP/HTTPS/ALL proxy variables for the CPU cluster helpers,
+matching the normal node launcher. An inherited SSH proxy can let discovery
+find all vLLM replicas while every subsequent private-IP `/metrics` request
+fails, incorrectly showing `engines 0/24` during active sampling. The pinned
+training code and GPU processes do not need restarting to correct this.
+
+`replace_progress_panel.py` is an explicit once-only CPU replacement. It checks
+the original panel's PID birth identity, exact Python module and run path,
+healthy guardian and live original training root before signaling that panel.
+The new panel keeps the same command and run, removes proxy routing, and uses
+original invocation markers so the external guardian discovers and monitors
+it. Its audit remains on HDFS; it cannot reparent legacy or externally launched
+processes for kernel reaping. Four CPU tests cover GPU-command rejection, run
+isolation, the valid panel and proxy removal without changing unrelated fields.

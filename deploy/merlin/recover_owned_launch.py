@@ -95,6 +95,13 @@ class RecoverySupervisor(_Supervisor):
         return super().discover()
 
 
+def cluster_helper_environment(environment):
+    # SSH sessions can inherit a corporate proxy, which cannot reach vLLM's
+    # private-IP metrics endpoints. Training's node launcher already unsets it.
+    return {k: v for k, v in environment.items()
+            if k.lower() not in ('http_proxy', 'https_proxy', 'all_proxy')}
+
+
 def start_helpers(args, supervisor, control, run, directory):
     claim = control / 'tracking-bridge.claim'
     retired = None
@@ -147,6 +154,7 @@ def start_helpers(args, supervisor, control, run, directory):
     children = supervisor.helper_children
     with (directory / 'tracking.recovered.log').open('ab') as log:
         children.append(subprocess.Popen(bridge, env=env, stdout=log, stderr=subprocess.STDOUT))
+    env = cluster_helper_environment(env)
     repo = Path(args.root) / 'repo'
     compat = Path(args.root) / 'compat/cuda-compat-13-0_580.196.07/usr/local/cuda-13.0/compat'
     env.update(PYTHONPATH=f'{repo}/pear/utils/sitecustomize:{repo}:{repo}/3rdparty/verl/src',
