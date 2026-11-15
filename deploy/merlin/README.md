@@ -160,3 +160,20 @@ The controller allows 120 seconds after SIGKILL for large pinned-memory workers
 to finish kernel teardown and be reaped, then retains ownership if any child
 remains. Rank zero waits up to 300 seconds for all cleanup acknowledgements.
 No grace period permits unsafe lock takeover.
+
+## Worker-group master port allocation
+
+`pear_merlin_ports` is loaded through veRL's external-module hook for this
+deployment. It replaces only the worker-group master-address allocator. Ports
+are selected from 21000–29999, validated against each node's actual ephemeral
+range, and claimed atomically in a per-launch node-local directory. A claim
+persists after the probe socket closes, preventing another group from selecting
+the same port while rank zero is still being created. Existing listeners are
+skipped. No kernel/network sysctl, training objective, model or runtime package
+is changed. Ray's worker port range remains 3000–5999. The old EADDRINUSE at
+TCPStore startup was observed with a master port in the ephemeral range.
+
+The launcher propagates the plugin, its fixed-release Python path and the same
+launch ID through Ray runtime_env. CPU regressions exercise real concurrent
+processes and delayed socket binding; a separate actual-runtime check loads the
+veRL external hook and creates two real CPU TCPStores with successful round trips.

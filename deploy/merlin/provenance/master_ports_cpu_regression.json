@@ -1,0 +1,43 @@
+{
+  "scope": "CPU-only port allocation and actual veRL hook/TCPStore integration",
+  "tests_passed": 49,
+  "tests_failed": 0,
+  "tests_skipped": 0,
+  "tested_sha256": {
+    "deploy/merlin/process_supervisor.py": "cd71d951c2defab8822158be1e1553c04d8efc308f49e3f61312c5a879c4ee37",
+    "deploy/merlin/validate_cluster64.py": "9664fd6cec8f1d40e99a3153c74c204f9372c04c73979d4859724378ec812e65",
+    "deploy/merlin/pear_merlin_ports.py": "78fdb2cf143bff891dd98008a22d2b4cc812c112c0e4e06c9dda3a3914218f5d",
+    "deploy/merlin/tracking_bridge.py": "7da2d680ec9bf0b74102e37596fbb44ab995664b1e1cee26a6af644996028e80",
+    "deploy/merlin/launcher_control.py": "1a3255f66a53759391808778707c9c8eec2e465fc7e6587a1d6a5f92a1e8b9f1",
+    "deploy/merlin/topology.py": "806636c939d2415bb21f271f936cd89a8a7b3b312a1a69bea73cf4714d472b87",
+    "deploy/merlin/stage1_node.sh": "831e98c1a4a649314b257b68580bebff1ebdc4808377cc52785e1f4329ebeaf2",
+    "deploy/merlin/job_entrypoint.sh": "0bb339fa2a418ff2aa8fc4fd0a654853cccd58fbed9f4adf8d7a229e107ad1ae",
+    "deploy/merlin/merlin_stage1_entry.sh": "8445817a04405665972037164de952d85b05632be3921a148209243c2f1f6f97",
+    "deploy/merlin/start_ray_node.sh": "50161734780c147ce47c6114ee54861f3ae6c8336a35a505a50519f0d8bf4b7f",
+    "deploy/merlin/worker_entry.sh": "5a01b5b0da2b8a664bd054bcc271b73c5ef7eb54c827fa0aa33f8ab7d8864ce9",
+    "deploy/merlin/network_env.sh": "4231a752bafd6dd702a82d007d53b0ec059424570de534174ffbfe4518298044",
+    "deploy/merlin/tests/test_master_ports.py": "85f6b23b21f1d6868f845365e048b698f5ac2e82d27dce44cc314c495c063b70",
+    "deploy/merlin/tests/test_job_entrypoint.py": "ce11193ccf1ac5ddb548335e25d41270bd2a27be3f3927d3ea6f2a535b6edefc",
+    "deploy/merlin/tests/test_launcher_control.py": "0e787067e0ed08f40e75029f2c9cd03670ad639eab15a1d4d59f280497b6b0ff",
+    "deploy/merlin/tests/test_descriptor_limit.py": "d6881fc60d89ddf5822ca1bfcf7094e8babf2ca2be3e1ac8dcb481dff52947db",
+    "deploy/merlin/tests/test_tracking_bridge.py": "78f3b7b577cb1c84e01b9cb81a46be9028843077e1c7d38f2844fa39b664f1c7",
+    "deploy/merlin/tests/test_process_supervisor.py": "cb3a38bca2cfb01738ed0969eff00451f2d816f43025d0264ea55b855887dd39",
+    "deploy/merlin/tests/test_topology.py": "c25aa04ff55a96962f11a062b021595c861fac23f4a8a906db23e0db13f57ad0"
+  },
+  "integration": {
+    "external_hook_installed": true,
+    "master_addresses": [
+      [
+        "127.0.0.1",
+        "23314"
+      ],
+      [
+        "127.0.0.1",
+        "28003"
+      ]
+    ],
+    "real_tcpstores": 2,
+    "gpu_used": false
+  },
+  "gpu_training_verified": false
+}

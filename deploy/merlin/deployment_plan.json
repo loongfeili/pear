@@ -105,5 +105,18 @@
     "hard_limit_preserved": true
   },
   "process_kill_grace_seconds": 120,
-  "all_rank_cleanup_timeout_seconds": 300
+  "all_rank_cleanup_timeout_seconds": 300,
+  "worker_group_master_ports": {
+    "range_inclusive": [
+      21000,
+      29999
+    ],
+    "plugin": "pear_merlin_ports",
+    "leases": "per-node/per-launch atomic mkdir",
+    "ephemeral_range_overlap": "refused",
+    "ray_worker_range_inclusive": [
+      3000,
+      5999
+    ]
+  }
 }

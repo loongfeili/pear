@@ -146,7 +146,7 @@ record = {
     'baseline_candidate_record_unchanged': saved['candidate'],
     'source_sha256': saved['source_sha256'], 'runtime_bundle_sha256': saved['runtime_bundle']['sha256'],
     'launcher_sha256': {name: hashlib.sha256((launch / name).read_bytes()).hexdigest()
-                       for name in ['stage1_node.sh', 'merlin_stage1_entry.sh', 'worker_entry.sh', 'launcher_control.py', 'process_supervisor.py', 'network_env.sh', 'start_ray_node.sh', 'validate_cluster64.py', 'topology.py', 'job_entrypoint.sh', 'tracking_bridge.py']},
+                       for name in ['stage1_node.sh', 'merlin_stage1_entry.sh', 'worker_entry.sh', 'launcher_control.py', 'process_supervisor.py', 'network_env.sh', 'start_ray_node.sh', 'validate_cluster64.py', 'topology.py', 'job_entrypoint.sh', 'tracking_bridge.py', 'pear_merlin_ports.py']},
     'validation_scope': 'Frozen source/runtime and one actual 8-GPU GRPO step; not a multi-node training certificate.',
     'multi_node_training_verified': False,
 }
@@ -221,6 +221,10 @@ PY
   # context, batch, group size, FSDP8/SP8, TP4 and algorithm at upstream Stage 1 values.
   setsid bash examples/models/qwen3_8_27b_pear/train/run_stage1.sh \
     'actor_rollout_ref.rollout.custom.lmcache.l1_size_gb=600' \
+    "++ray_kwargs.ray_init.runtime_env.env_vars.VERL_USE_EXTERNAL_MODULES='pear.rollout.server,pear.models.qwen3_5.tool_parser,pear_merlin_ports'" \
+    "++ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH='$LAUNCH:$REPO/pear/utils/sitecustomize:$REPO:$REPO/3rdparty/verl/src'" \
+    "++ray_kwargs.ray_init.runtime_env.env_vars.PEAR_RESERVED_MASTER_PORTS='1'" \
+    "++ray_kwargs.ray_init.runtime_env.env_vars.PEAR_LAUNCH_ID=$LAUNCH_ID" \
     "+ray_kwargs.ray_init.runtime_env.env_vars.LD_LIBRARY_PATH=$LD_LIBRARY_PATH" \
     "+ray_kwargs.ray_init.runtime_env.env_vars.PEAR_CUDA_COMPAT_DIR=$PEAR_CUDA_COMPAT_DIR" \
     "+ray_kwargs.ray_init.runtime_env.env_vars.NCCL_SOCKET_IFNAME='$NCCL_SOCKET_IFNAME'" \
