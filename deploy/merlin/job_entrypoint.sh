@@ -15,7 +15,16 @@ trap stop INT TERM
 
 ROOT=${PEAR_ROOT:?PEAR_ROOT is required}
 RELEASE=$(cd "$(dirname "$0")/../.." && pwd -P) || exit 2
-export PEAR_TRACKING_PYTHON=${PEAR_TRACKING_PYTHON:-$(command -v python3)}
+# Resolve in the image before activating the training venv. Different images
+# place this executable under /usr/bin or /usr/local/bin; stale job overrides
+# must not prevent release verification or writing the failure status.
+REQUESTED_PYTHON=${PEAR_TRACKING_PYTHON:-python3}
+if ! IMAGE_PYTHON=$(command -v "$REQUESTED_PYTHON") || [[ ! -x "$IMAGE_PYTHON" ]]; then
+  echo "Unavailable image Python $REQUESTED_PYTHON; resolving python3 from PATH" >&2
+  IMAGE_PYTHON=$(command -v python3) || exit 127
+fi
+"$IMAGE_PYTHON" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' || exit 127
+export PEAR_TRACKING_PYTHON=$IMAGE_PYTHON
 export PEAR_TOTAL_GPUS=${PEAR_TOTAL_GPUS:-128}
 export PEAR_LAUNCH_ID=${PEAR_LAUNCH_ID:-merlin-trial-${ARNOLD_TRIAL_ID:?}-stage1-${PEAR_TOTAL_GPUS:-128}-v1}
 export PEAR_RUN=${PEAR_RUN:-$ROOT/work_dir/runs/$PEAR_LAUNCH_ID}

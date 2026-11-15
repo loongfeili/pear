@@ -137,3 +137,12 @@ uses byted-wandb to mirror real JSONL metrics to the internal Tracking service,
 without changing the validated training environment's official wandb package.
 The true SDK URL is recorded in `tracking.json`; no training Run is fabricated
 while a job is waiting in the scheduler. See `TRACKING.md` for bridge details.
+
+## Image Python path portability
+
+The job entry resolves the requested image Python before environment activation.
+If a copied job specifies a missing executable (for example `/usr/local/bin/python3`
+in an image that provides `/usr/bin/python3`), it falls back to `python3` on PATH
+and exports the resolved executable to the independent Tracking bridge. This
+also ensures release verification and final status recording use a working
+interpreter. New job configurations should omit a hardcoded interpreter override.

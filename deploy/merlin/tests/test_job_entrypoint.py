@@ -15,7 +15,7 @@ ENTRY = Path(__file__).resolve().parents[1] / 'job_entrypoint.sh'
 
 @unittest.skipUnless(sys.platform.startswith('linux'), 'requires Linux sleep infinity')
 class JobEntrypointTests(unittest.TestCase):
-    def run_fixture(self, corrupt=False, optimize=False):
+    def run_fixture(self, corrupt=False, optimize=False, missing_python=False):
         with tempfile.TemporaryDirectory(prefix='pear-entrypoint-test-') as temporary:
             base = Path(temporary)
             release = base / 'release'
@@ -24,7 +24,7 @@ class JobEntrypointTests(unittest.TestCase):
             shutil.copyfile(ENTRY, scripts / ENTRY.name)
             launcher = scripts / 'merlin_stage1_entry.sh'
             sentinel = base / 'executions'
-            launcher.write_text('printf "executed:%s\\n" "$PEAR_TOTAL_GPUS" >> "$FIXTURE_SENTINEL"\nexit 7\n')
+            launcher.write_text('"$PEAR_TRACKING_PYTHON" -c "import sys" || exit 99\nprintf "executed:%s\\n" "$PEAR_TOTAL_GPUS" >> "$FIXTURE_SENTINEL"\nexit 7\n')
             manifest = {'git_commit': 'a' * 40, 'files': {
                 str(path.relative_to(release)): hashlib.sha256(path.read_bytes()).hexdigest()
                 for path in scripts.iterdir()}}
@@ -36,6 +36,8 @@ class JobEntrypointTests(unittest.TestCase):
                        PEAR_LAUNCH_ID='test-keepalive', ARNOLD_ID='0', ARNOLD_TRIAL_ID='1',
                        FIXTURE_SENTINEL=str(sentinel))
             env.pop('PEAR_TOTAL_GPUS', None)  # Platform wrapper must default consistently to 128.
+            if missing_python:
+                env['PEAR_TRACKING_PYTHON'] = str(base / 'nonexistent/bin/python3')
             if optimize:
                 env['PYTHONOPTIMIZE'] = '1'
             process = subprocess.Popen(['bash', str(scripts / ENTRY.name)], env=env,
@@ -76,6 +78,9 @@ class JobEntrypointTests(unittest.TestCase):
 
     def test_optimized_python_cannot_bypass_release_verification(self):
         self.run_fixture(corrupt=True, optimize=True)
+
+    def test_missing_job_python_override_falls_back_and_records_failure(self):
+        self.run_fixture(missing_python=True)
 
 
 if __name__ == '__main__':
