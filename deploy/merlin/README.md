@@ -210,3 +210,22 @@ restarting GPU actors merely to relocate their descriptors.
 existing async agent-loop actors. It verifies trial, launch, actor class and
 filenames first, uses per-host directories to avoid PID collisions, and leaves
 policy parameters, rewards, sampling and episode state untouched.
+
+
+### Recovered Tracking run still labeled crashed
+
+The reviewed byted-wandb 0.13.98 client can resume streaming into the original
+Run without clearing its old `crashed` metadata label. This is separate from
+server acknowledgement of scalar points. `repair_tracking_status.py` is an
+explicit operator recovery command; it requires fresh streaming and guardian
+journals, live original-root and producer birth identities, and exact
+project/run/job/trial association. It only refreshes the heartbeat and changes a
+`crashed` label to `running`, then reads the server back. It cannot revive a
+finished/failed run, initialize a second producer, or write scalar points.
+
+Use the image Python, the actual recovered HDFS control directory, and its
+rank-0 recovery directory. Save the repair utility in a new fixed-commit HDFS
+release; do not edit an existing release or restart the GPU training to fix a
+Tracking label. The utility writes its before/after audit to HDFS
+`control/tracking_status_repair.json`. Its six CPU tests cover wrong association,
+failed lookups, terminal states and SDK errors swallowed before readback.
