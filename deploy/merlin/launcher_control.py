@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import signal
 import socket
 import sys
@@ -48,9 +49,25 @@ def release_owned_lock(path, owner, destination):
     path.rename(destination)
 
 
+def configure_descriptor_limit():
+    """Raise the inherited SSH soft limit before Ray/gRPC processes are spawned."""
+    minimum, requested = 65536, int(os.environ.get('PEAR_NOFILE', '262144'))
+    if requested < minimum:
+        raise ValueError(f'PEAR_NOFILE must be at least {minimum}')
+    before = resource.getrlimit(resource.RLIMIT_NOFILE)
+    soft, hard = before
+    if hard != resource.RLIM_INFINITY and hard < minimum:
+        raise RuntimeError(f'Open-file hard limit {hard} is below required {minimum}')
+    target = requested if hard == resource.RLIM_INFINITY else min(requested, hard)
+    if soft != resource.RLIM_INFINITY and soft < target:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    return {'before': before, 'after': resource.getrlimit(resource.RLIMIT_NOFILE),
+            'requested': requested, 'minimum': minimum}
+
+
 class Launch:
     def __init__(self, root, run, launch_id, rank, nodes, node_lock, timeout=1200,
-                 cleanup_timeout=120, resume=False, term_grace=10):
+                 cleanup_timeout=300, resume=False, term_grace=10, kill_grace=120):
         if not re.fullmatch(r'[a-zA-Z0-9_-]+', launch_id):
             raise ValueError('Invalid launch ID')
         if nodes < 1 or rank < 0 or rank >= nodes:
@@ -63,6 +80,7 @@ class Launch:
         self.node_lock = Path(node_lock).resolve()
         self.timeout, self.cleanup_timeout = timeout, cleanup_timeout
         self.resume, self.term_grace = resume, term_grace
+        self.kill_grace = kill_grace
         self.owns_rank = self.owns_run = self.owns_node = False
         self.ready = False
         self.record = self.run_owner = self.node_owner = None
@@ -191,6 +209,9 @@ class Launch:
                 self.await_run()
             self.check_wait()
             self.acquire_node()
+            limits = configure_descriptor_limit()
+            publish(self.control / f'limits.{self.rank}.json', limits)
+            print(f'PEAR_NOFILE rank={self.rank} before={limits["before"]} after={limits["after"]}', flush=True)
             environment = os.environ.copy()
             environment.update({'PEAR_ROOT': str(self.root), 'PEAR_RUN': str(self.run),
                                 'PEAR_LAUNCH_ID': self.launch_id, 'PEAR_SUPERVISED': '1',
@@ -201,6 +222,7 @@ class Launch:
             status = supervise(command, env=environment,
                                ownership_dir=self.control / 'processes' / str(self.rank),
                                term_grace=self.term_grace,
+                               kill_grace=self.kill_grace,
                                stop_signal=lambda: self.interrupted)
             cleanup_ok = True
             if status != 0:
@@ -236,20 +258,22 @@ def main():
     parser.add_argument('--nodes', type=int, required=True)
     parser.add_argument('--node-lock', default=f'/var/tmp/pear-merlin-{os.getuid()}.active')
     parser.add_argument('--timeout', type=float, default=1200)
-    parser.add_argument('--cleanup-timeout', type=float, default=120)
+    parser.add_argument('--cleanup-timeout', type=float, default=300)
     parser.add_argument('--term-grace', type=float, default=10)
+    parser.add_argument('--kill-grace', type=float, default=120,
+                        help='Allow pinned host-memory teardown and zombie reaping before retaining locks')
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     if not command:
         parser.error('A worker command is required')
-    for name in ('timeout', 'cleanup_timeout', 'term_grace'):
+    for name in ('timeout', 'cleanup_timeout', 'term_grace', 'kill_grace'):
         if getattr(args, name) <= 0:
             parser.error(f'{name} must be positive')
     return Launch(args.root, args.run, args.launch_id, args.rank, args.nodes,
                   args.node_lock, args.timeout, args.cleanup_timeout,
-                  args.resume, args.term_grace).execute(command)
+                  args.resume, args.term_grace, args.kill_grace).execute(command)
 
 
 if __name__ == '__main__':

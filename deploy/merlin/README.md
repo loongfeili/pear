@@ -146,3 +146,17 @@ in an image that provides `/usr/bin/python3`), it falls back to `python3` on PAT
 and exports the resolved executable to the independent Tracking bridge. This
 also ensures release verification and final status recording use a working
 interpreter. New job configurations should omit a hardcoded interpreter override.
+
+## Ray descriptor capacity and large-cache shutdown
+
+The owning controller raises the inherited open-file soft limit to 262144
+(`PEAR_NOFILE`), capped by the hard limit, before spawning any worker or Ray
+process. It preserves higher existing limits and refuses a hard limit below
+65536. `CONTROL/limits.<rank>.json` records before/after values. The earlier
+1024 soft limit exhausted GCS sockets as hundreds of actors registered.
+Kernel FD table presizing in `sitecustomize` is separate from raising this limit.
+
+The controller allows 120 seconds after SIGKILL for large pinned-memory workers
+to finish kernel teardown and be reaped, then retains ownership if any child
+remains. Rank zero waits up to 300 seconds for all cleanup acknowledgements.
+No grace period permits unsafe lock takeover.

@@ -97,5 +97,13 @@
       "lmcache_tiers_per_rollout_node": 2
     }
   },
-  "deployment_commit_env": "PEAR_DEPLOY_COMMIT; recorded in per-launch deployment<gpus>.json"
+  "deployment_commit_env": "PEAR_DEPLOY_COMMIT; recorded in per-launch deployment<gpus>.json",
+  "open_file_limit": {
+    "minimum": 65536,
+    "default_target": 262144,
+    "override": "PEAR_NOFILE",
+    "hard_limit_preserved": true
+  },
+  "process_kill_grace_seconds": 120,
+  "all_rank_cleanup_timeout_seconds": 300
 }
