@@ -4,20 +4,20 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3_5RMSNorm
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
-from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.qwen3_5 import (
     Qwen3_5DecoderLayer,
     Qwen3_5ForCausalLM,
     Qwen3_5ForConditionalGeneration,
     Qwen3_5Model,
 )
-from vllm.model_executor.models.qwen3_next import Qwen3NextAttention, Qwen3NextDecoderLayer, Qwen3NextModel
-from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer
+from vllm.model_executor.models.qwen3_next import Qwen3NextDecoderLayer, Qwen3NextModel
+from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer, mrope_positions_factor
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     extract_layer_index,
@@ -26,6 +26,11 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.tokenizers.registry import cached_tokenizer_from_config
+
+from pear.models.qwen3_5.rollout.attention import Qwen3_5RolloutAttention
+from pear.models.qwen3_5.rollout.mlp import Qwen3_5RolloutMLP
+from pear.models.qwen3_5.rollout.model_state import Qwen3_5RolloutModelState
+from pear.models.qwen3_5.rollout.rope import Fp32Rope
 
 
 class Qwen3_5RolloutDecoderLayer(Qwen3_5DecoderLayer):
@@ -36,7 +41,7 @@ class Qwen3_5RolloutDecoderLayer(Qwen3_5DecoderLayer):
     reduce_results: ClassVar[bool] = True
 
     def __init__(self, vllm_config: VllmConfig, layer_type: str, prefix: str = "") -> None:
-        # vLLM 0.28's Qwen3_5DecoderLayer.__init__ for the dense model: no MoE, no layer scale
+        # vLLM's Qwen3_5DecoderLayer.__init__ for the dense model: no MoE, no layer scale
         super(Qwen3NextDecoderLayer, self).__init__()
         config = vllm_config.model_config.hf_text_config
         if config.model_type != self.TEXT_MODEL_TYPE or getattr(config, "layer_scale", False):
@@ -58,18 +63,19 @@ class Qwen3_5RolloutDecoderLayer(Qwen3_5DecoderLayer):
                 reduce_results=self.reduce_results,
             )
         elif layer_type == "full_attention":
-            self.self_attn = Qwen3NextAttention(
+            self.self_attn = Qwen3_5RolloutAttention(
                 config,
                 model_config=vllm_config.model_config,
                 cache_config=vllm_config.cache_config,
                 quant_config=vllm_config.quant_config,
                 prefix=f"{prefix}.self_attn",
                 reduce_results=self.reduce_results,
+                mrope_positions_factor=mrope_positions_factor(vllm_config),
             )
         else:
             raise ValueError(f"Invalid layer_type {layer_type}")
 
-        self.mlp = Qwen3NextMLP(
+        self.mlp = Qwen3_5RolloutMLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
@@ -91,13 +97,14 @@ class Qwen3_5RolloutDecoderLayer(Qwen3_5DecoderLayer):
     }
 )
 class Qwen3_5RolloutModel(Qwen3_5Model):
-    """vLLM's Qwen3.5 language model built from a GPU backend's decoder layer and token embedding."""
+    """vLLM's Qwen3.5 language model built from a GPU backend's decoder layer and token embedding, its rotary embedding
+    in fp32."""
 
     decoder_layer_cls: ClassVar[type[Qwen3_5RolloutDecoderLayer]] = Qwen3_5RolloutDecoderLayer
     embedding_cls: ClassVar[type[VocabParallelEmbedding]] = VocabParallelEmbedding
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        # vLLM 0.28's Qwen3_5Model.__init__ with the GPU backend's classes
+        # vLLM's Qwen3_5Model.__init__ with the GPU backend's classes (the dense model: no fused shared experts)
         super(Qwen3NextModel, self).__init__()
         config = vllm_config.model_config.hf_text_config
         self.num_redundant_experts = vllm_config.parallel_config.eplb_config.num_redundant_experts
@@ -123,6 +130,9 @@ class Qwen3_5RolloutModel(Qwen3_5Model):
             self.norm = PPMissingLayer()
         self.aux_hidden_state_layers: tuple[int, ...] = ()
 
+        # the fp32 cos / sin cache the attention layers' q / k kernel rotates with
+        Fp32Rope.install(self)
+
 
 class Qwen3_5RolloutForCausalLM(Qwen3_5ForCausalLM):
     """vLLM's Qwen3.5 causal LM built from a GPU backend's language model and logits processor."""
@@ -131,15 +141,10 @@ class Qwen3_5RolloutForCausalLM(Qwen3_5ForCausalLM):
     logits_processor_cls: ClassVar[type[LogitsProcessor]] = LogitsProcessor
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        # vLLM 0.28's Qwen3_5ForCausalLMBase.__init__ with the GPU backend's classes
+        # vLLM's Qwen3_5ForCausalLMBase.__init__ with the GPU backend's classes
         config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        if vllm_config.cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Qwen3.5 currently does not support 'all' prefix caching, please use '--mamba-cache-mode=align' instead"
-            )
-
         self.quant_config = vllm_config.quant_config
         nn.Module.__init__(self)
         self.config = config
@@ -164,17 +169,19 @@ class Qwen3_5RolloutForCausalLM(Qwen3_5ForCausalLM):
 
 class Qwen3_5RolloutForConditionalGeneration(Qwen3_5ForConditionalGeneration):
     """vLLM's Qwen3.5 vision-language model built from a GPU backend's causal LM, its unquantized linear layers on the
-    GPU backend's linear method (registered out of tree for VllmGpuBackend.ARCHITECTURE)."""
+    GPU backend's linear method (registered out of tree for VllmGpuBackend.ARCHITECTURE), stepped with the GPU
+    backend's model state."""
 
     VISION_NORM_EPS = 1e-6  # the vision tower's norm epsilon when the config names none (vLLM's default)
     causal_lm_cls: ClassVar[type[Qwen3_5RolloutForCausalLM]] = Qwen3_5RolloutForCausalLM
     linear_method_cls: ClassVar[type[UnquantizedLinearMethod]] = UnquantizedLinearMethod
+    model_state_cls: ClassVar[type[Qwen3_5RolloutModelState]]  # the GPU backend's model state
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
-        # vLLM 0.28's Qwen3_5ForConditionalGeneration.__init__ with the GPU backend's causal LM
+        # vLLM's Qwen3_5ForConditionalGeneration.__init__ with the GPU backend's causal LM
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
         self.config = config
         self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
@@ -194,6 +201,7 @@ class Qwen3_5RolloutForConditionalGeneration(Qwen3_5ForConditionalGeneration):
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", self.VISION_NORM_EPS),
                 quant_config=vllm_config.quant_config,
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
         with self._mark_language_model(vllm_config):
@@ -207,3 +215,8 @@ class Qwen3_5RolloutForConditionalGeneration(Qwen3_5ForConditionalGeneration):
         for module in self.modules():
             if isinstance(module, LinearBase) and type(module.quant_method) is UnquantizedLinearMethod:
                 module.quant_method = self.linear_method_cls()
+
+    @classmethod
+    def get_model_state_cls(cls) -> type[Qwen3_5RolloutModelState]:
+        """The model state vLLM's V2 runner steps the model with: the GPU backend's."""
+        return cls.model_state_cls

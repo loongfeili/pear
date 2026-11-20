@@ -9,11 +9,9 @@ import torch.distributed as dist
 from torch.utils.checkpoint import checkpoint
 
 from verl.utils.device import get_device_capability
-from verl.utils.net_utils import get_free_port
 
 pytestmark = pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Ulysses over two GPUs")
 
-LOCALHOST = "127.0.0.1"
 SP = 2
 SMALL_HIDDEN = 512
 LENGTHS = [900, 1700, 402]  # the second sequence crosses the ranks' boundary (3002 tokens, 1501 per rank)
@@ -103,6 +101,30 @@ def gated_delta_net_checks(rank: int, gpu_backend) -> None:
     assert rel_err(gathered(split_grad), whole_grad) < 1e-2  # the halo's gradient returned to the previous rank
     for split_weight_grad, whole_weight_grad in zip(split_weight_grads, whole_weight_grads, strict=True):
         assert rel_err(summed(split_weight_grad), whole_weight_grad) < 1e-2
+
+
+def stock_gated_delta_net_checks(rank: int) -> None:
+    """verl's mixer, the actor's without the GPU backend, over the ranks' slices against the same mixer on the whole
+    batch in one rank: transformers' kernel wrapper hands FLA's delta rule the context-parallel state."""
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5GatedDeltaNet
+
+    from verl.models.transformers.qwen3_5 import qwen3_5_gated_delta_net_forward
+    from verl.utils.ulysses import set_ulysses_sequence_parallel_group
+
+    torch.manual_seed(2)
+    mixer = Qwen3_5GatedDeltaNet(small_text_config(), layer_idx=0).cuda().bfloat16()
+    T = sum(LENGTHS)
+    cu = torch.tensor([0, *itertools.accumulate(LENGTHS)], device="cuda", dtype=torch.long)
+    x = torch.randn(1, T, SMALL_HIDDEN, device="cuda", dtype=torch.bfloat16)
+    local = slice(rank * T // SP, (rank + 1) * T // SP)
+
+    with torch.no_grad():
+        set_ulysses_sequence_parallel_group(None)
+        whole = qwen3_5_gated_delta_net_forward(mixer, x, cu_seqlens=cu, cu_seqlens_cpu=cu.cpu())
+        set_ulysses_sequence_parallel_group(dist.group.WORLD)
+        split = qwen3_5_gated_delta_net_forward(mixer, x[:, local], cu_seqlens=cu, cu_seqlens_cpu=cu.cpu())
+
+    assert rel_err(gathered(split), whole) < 2e-3
 
 
 def fla_candidate_checks() -> None:
@@ -204,15 +226,16 @@ def attention_checks(rank: int, gpu_backend, kv_heads: int) -> None:
     assert rel_err(recomputed_grad, x64.grad) < 2 * rel_err(baseline_grad, x64.grad)
 
 
-def two_rank_checks(rank: int, port: int) -> None:
+def two_rank_checks(rank: int, rendezvous: str) -> None:
     from pear.models.qwen3_5.trainer.hopper.gpu_backend import HopperTrainingGpuBackend
     from pear.models.qwen3_5.trainer.training_kernels import Qwen3_5TrainingKernels
 
     torch.cuda.set_device(rank)
-    dist.init_process_group("nccl", init_method=f"tcp://{LOCALHOST}:{port}", rank=rank, world_size=SP)
+    dist.init_process_group("nccl", init_method=f"file://{rendezvous}", rank=rank, world_size=SP)
     gpu_backend = Qwen3_5TrainingKernels.select_gpu_backend(get_device_capability())
     gpu_backend.install()
     try:
+        stock_gated_delta_net_checks(rank)
         gated_delta_net_checks(rank, gpu_backend)
         if gpu_backend is HopperTrainingGpuBackend:
             fla_candidate_checks()
@@ -224,5 +247,7 @@ def two_rank_checks(rank: int, port: int) -> None:
         dist.destroy_process_group()
 
 
-def test_the_mixers_under_ulysses_on_two_ranks():
-    torch.multiprocessing.spawn(two_rank_checks, args=(get_free_port(LOCALHOST)[0],), nprocs=SP)
+def test_the_mixers_under_ulysses_on_two_ranks(tmp_path):
+    # the ranks meet at a file of the test's own: a free port picked beforehand can be taken by another process
+    # before rank 0 binds it
+    torch.multiprocessing.spawn(two_rank_checks, args=(str(tmp_path / "rendezvous"),), nprocs=SP)

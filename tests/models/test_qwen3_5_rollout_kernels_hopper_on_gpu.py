@@ -5,12 +5,15 @@ import pytest
 import torch
 import torch.nn.functional as F
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config.cache import CacheConfig
 from vllm.distributed.parallel_state import (
     destroy_distributed_environment,
     destroy_model_parallel,
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
+from vllm.models.qwen3_5.nvidia.model import Qwen3_5RMSNorm as VllmQwen3_5RMSNorm
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.chunk_delta_h import chunk_gated_delta_rule_fwd_kernel_h_blockdim64
 from vllm.third_party.flash_linear_attention.ops.chunk_o import chunk_fwd_kernel_o
@@ -21,20 +24,23 @@ from vllm.third_party.flash_linear_attention.ops.solve_tril import (
     merge_16x16_to_64x64_inverse_kernel,
 )
 from vllm.third_party.flash_linear_attention.ops.wy_fast import recompute_w_u_fwd_kernel
+from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.worker.utils import select_common_block_size
 
-from pear.models.qwen3_5.rollout.hopper.all_reduce import DecodeAllReduce
+from pear.models.qwen3_5.rollout.hopper.all_reduce import AllReduceNorm
 from pear.models.qwen3_5.rollout.hopper.attention import (
     HEAD_DIM,
     QUERY_HEADS,
     HopperFlashAttentionImpl,
-    HopperFlashAttentionMetadataBuilder,
 )
 from pear.models.qwen3_5.rollout.hopper.cudagraph import HopperMixedStepGraphs
 from pear.models.qwen3_5.rollout.hopper.extension import HopperExtension
 from pear.models.qwen3_5.rollout.hopper.gdn import CHUNK, FusedGDNDecode, GDNLayout, MixedStepGDNCore
 from pear.models.qwen3_5.rollout.hopper.gpu_backend import HopperRolloutGpuBackend
+from pear.models.qwen3_5.rollout.hopper.model import HopperQwen3_5DecoderLayer
 from pear.models.qwen3_5.rollout.hopper.sampler import HopperSampler
-from verl.utils.net_utils import get_free_port
 
 # the GPU backend's own tests run on the GPUs that select it
 pytestmark = pytest.mark.skipif(
@@ -51,16 +57,23 @@ SLOTS = 8  # state slots of the pool; slot 0 is the null block, the padding rows
 EPS = 1e-6  # the gated norm's and the RMSNorm's epsilon
 L2_EPS = 1e-6  # vLLM's q / k l2norm epsilon, under the square root
 GRAPH_ROWS = 256  # the token count a mixed-step graph pads the test batch to
+ABOVE_GRAPH_ROWS = HopperMixedStepGraphs.MAX_TOKENS + 8  # a mixed step above the largest mixed-step graph
 KV_BLOCKS = 200  # pages of the attention test's KV cache
-PAGE = HopperFlashAttentionMetadataBuilder.PAGE  # tokens per page
+KV_HEADS = 1  # the attention's KV heads on one of four ranks
+CONV_WIDTH = 4  # the Gated DeltaNet's causal conv taps
+PARTIAL_TILE_PAGE = 784  # a page of twelve of the decode kernel's 64-token tiles and a partial one of 16 tokens
 HIDDEN = 5120  # the model's hidden size
 VOCAB = 248320
 NORM_BIAS = 1.0  # Qwen3.5's RMSNorm scales by 1 + w (FlashInfer's weight_bias)
-LOCALHOST = "127.0.0.1"
 SAMPLER_ROWS = 64  # a decode step's rows
 MAX_LOGPROBS = HopperSampler.MAX_LOGPROBS  # the largest top-K the sampler's kernels keep
 DRAWS = 50  # sampler calls of the distribution check, over 256 rows each
 SAMPLER_SEED = 5  # the seed of the sampler's draws in its test
+BF16_ROUNDING = 2**-8  # a bf16 rounding's relative error, with margin (half an ulp is 2^-9)
+FP32_ROUNDING = 2**-20  # the relative error of a few fp32 roundings of a sum, against its terms' magnitudes
+NORM_ATOL = 1e-5  # the normed rows' absolute tolerance beside BF16_ROUNDING, for rows near zero
+STREAM_LAYERS = 3  # decoder layers of the residual stream check
+PARTIAL_SCALES = (0.25, 0.5, -0.125, 0.375)  # the stub sublayers' row-parallel partials: the normed rows times these
 
 
 def gdn_layer(generator: torch.Generator) -> types.SimpleNamespace:
@@ -261,26 +274,43 @@ def test_the_chunk_kernels_equal_flas():
     assert torch.equal(layer.kv_cache[1][prefills], final)
 
 
-def test_the_split_decode_attention_matches_the_reference():
+def attention_page() -> int:
+    """The tokens per page of an H100 replica's attention as vLLM derives them for Qwen3.8-27B at TP4: the hybrid
+    KV cache block that holds a Gated DeltaNet state (Platform._align_hybrid_block_size from FlashAttention's preferred
+    block), which FlashAttention-3 takes whole (select_common_block_size)."""
+    attention_bytes = FullAttentionSpec(
+        block_size=1, num_kv_heads=KV_HEADS, head_size=HEAD_DIM, dtype=torch.bfloat16
+    ).page_size_bytes
+    shapes = MambaStateShapeCalculator.gated_delta_net_state_shape(TP, TP * H, TP * HV, K, V, CONV_WIDTH)
+    mamba_bytes = MambaSpec(shapes=shapes, dtypes=HopperRolloutGpuBackend.STATE_DTYPES, block_size=-1).page_size_bytes
+    preferred_block = FlashAttentionBackend.get_preferred_block_size(CacheConfig.DEFAULT_BLOCK_SIZE)
+    hybrid_block = preferred_block * cdiv(mamba_bytes, preferred_block * attention_bytes)
+
+    return select_common_block_size(hybrid_block, [FlashAttentionBackend])
+
+
+# the replicas' page, and one whose last tile is partial
+@pytest.mark.parametrize("page", [attention_page(), PARTIAL_TILE_PAGE])
+def test_the_split_decode_attention_matches_the_reference(page):
     HopperExtension.load()
     generator = torch.Generator(device=DEVICE).manual_seed(2)
     rng = np.random.default_rng(2)
-    kv = torch.randn(KV_BLOCKS, PAGE, 1, 2 * HEAD_DIM, generator=generator, device=DEVICE).bfloat16()
+    kv = torch.randn(KV_BLOCKS, page, 1, 2 * HEAD_DIM, generator=generator, device=DEVICE).bfloat16()
     state = HopperFlashAttentionImpl.device_state(kv.device)
     scale = HEAD_DIM**-0.5
     # one token, page multiples and their neighbours, a long sequence beside short ones, a pure decode step
-    cases = [[1], [PAGE, 2 * PAGE, PAGE - 1, PAGE + 1], [40000, 1, 1, 7], rng.integers(1, 3000, 48).tolist()]
+    cases = [[1], [page, 2 * page, page - 1, page + 1], [40000, 1, 1, 7], rng.integers(1, 3000, 48).tolist()]
 
     for lens in cases:
         n = len(lens)
-        pages = [(length + PAGE - 1) // PAGE for length in lens]
+        num_pages = [(length + page - 1) // page for length in lens]
         order = rng.permutation(KV_BLOCKS)
-        table = torch.zeros(n, max(pages) + 2, dtype=torch.int32)
+        table = torch.zeros(n, max(num_pages) + 2, dtype=torch.int32)
         cache = kv.clone()
         for i, length in enumerate(lens):
-            table[i, : pages[i]] = torch.from_numpy(order[sum(pages[:i]) : sum(pages[: i + 1])])
+            table[i, : num_pages[i]] = torch.from_numpy(order[sum(num_pages[:i]) : sum(num_pages[: i + 1])])
             # the rows past the sequence's end in its last page are stale
-            cache[int(table[i, pages[i] - 1]), length - (pages[i] - 1) * PAGE :] = float("nan")
+            cache[int(table[i, num_pages[i] - 1]), length - (num_pages[i] - 1) * page :] = float("nan")
         table = table.to(DEVICE)
         seq_lens = torch.tensor(lens, dtype=torch.int32, device=DEVICE)
         q = (torch.randn(n, QUERY_HEADS + 2, HEAD_DIM, generator=generator, device=DEVICE) * 2).bfloat16()[
@@ -288,7 +318,7 @@ def test_the_split_decode_attention_matches_the_reference():
         ]
         want = []
         for i, length in enumerate(lens):
-            rows = cache[table[i, : pages[i]].long(), :, 0].reshape(-1, 2 * HEAD_DIM)[:length].double()
+            rows = cache[table[i, : num_pages[i]].long(), :, 0].reshape(-1, 2 * HEAD_DIM)[:length].double()
             weights = torch.softmax(q[i].double() @ rows[:, :HEAD_DIM].T * scale, -1)
             want.append(weights @ rows[:, HEAD_DIM:])
         want = torch.stack(want)
@@ -307,66 +337,168 @@ def test_the_split_decode_attention_matches_the_reference():
                 assert (out[decodes:] == 7.0).all() and not state["counters"].any()
 
 
-def four_rank_checks(rank: int, port: int) -> None:
-    """The decode all-reduce + residual + RMSNorm on one of four ranks."""
+class ScaledPartial:
+    """A stub sublayer that records its normed input rows and returns its rank's row-parallel partial of them: the rows
+    times the rank's scale."""
+
+    def __init__(self, rank: int) -> None:
+        self.rank = rank
+        self.inputs = []
+
+    def __call__(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        self.inputs.append(hidden_states)
+
+        return (hidden_states.float() * PARTIAL_SCALES[self.rank]).bfloat16()
+
+    @staticmethod
+    def partials(hidden_states: torch.Tensor) -> list[torch.Tensor]:
+        """Every rank's partial of the normed rows, in fp64."""
+        return [(hidden_states.float() * scale).bfloat16().double() for scale in PARTIAL_SCALES]
+
+
+class StreamBound:
+    """The error bound of an fp32 residual stream against fp64: each added sum of partials rounded to bf16 once, the
+    fp32 additions, against the terms' magnitudes."""
+
+    def __init__(self, start: torch.Tensor) -> None:
+        self.reduced = torch.zeros_like(start, dtype=torch.float64)
+        self.magnitude = start.double().abs()
+
+    def add(self, partials: list[torch.Tensor]) -> None:
+        """One all-reduce's partials (fp64), added into the stream."""
+        self.reduced += sum(partials).abs()
+        self.magnitude += sum(p.abs() for p in partials)
+
+    def holds(self, stream: torch.Tensor, reference: torch.Tensor) -> bool:
+        """Whether the stream is within the bound of the fp64 reference everywhere."""
+        bound = BF16_ROUNDING * self.reduced + FP32_ROUNDING * self.magnitude
+
+        return bool(((stream.double() - reference).abs() <= bound).all())
+
+
+def rms_reference(residual: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
+    """The RMSNorm of the residual rows with Qwen3.5's 1 + w scale, in fp64."""
+    rows = residual.double()
+
+    return rows * torch.rsqrt(rows.pow(2).mean(-1, keepdim=True) + EPS) * (gamma.double() + NORM_BIAS)
+
+
+def four_rank_checks(rank: int, rendezvous: str) -> None:
+    """The fused all-reduce + add into the fp32 residual stream + RMSNorm on one of four ranks against fp64: the pair
+    of kernels, the op on each path, and the decoder layers' residual stream from the embedding to the final norm."""
     torch.cuda.set_device(rank)
     with set_current_vllm_config(VllmConfig()):
-        init_distributed_environment(TP, rank, f"tcp://{LOCALHOST}:{port}", rank)
+        init_distributed_environment(TP, rank, f"file://{rendezvous}", rank)
         initialize_model_parallel(tensor_model_parallel_size=TP)
     HopperExtension.load()
+    AllReduceNorm.register_op()
     ops = torch.ops.pear_rollout_hopper
     generator = torch.Generator(device=DEVICE).manual_seed(6)  # the same draws on every rank
     text_config = types.SimpleNamespace(hidden_size=HIDDEN)
     model = types.SimpleNamespace(config=types.SimpleNamespace(get_text_config=lambda: text_config))
-    DecodeAllReduce.create_workspace(model)
-    workspace = DecodeAllReduce.workspace
+    AllReduceNorm.create_workspace(model)
+    workspace = AllReduceNorm.workspace
     buffers = (
         int(workspace.uc_ptrs_dev),
         int(workspace.uc_ptr_local),
         int(workspace.mc_ptr),
-        DecodeAllReduce.flags,
+        AllReduceNorm.flags,
         int(workspace.rank),
     )
     gamma = (0.1 * torch.randn(HIDDEN, generator=generator, device=DEVICE)).bfloat16()
-    scale = gamma.double() + NORM_BIAS
 
-    # the bf16 residual: the reduced rows (fp32 sums over the ranks in rank order, rounded) added in bf16
-    for T in (1, 7, 64, 128):
-        residual = (3 * torch.randn(T, HIDDEN, generator=generator, device=DEVICE)).bfloat16()
+    # the pair up to the largest mixed-step graph: the reduced rows (fp32 sums over the ranks in rank order, rounded to
+    # bf16) added into the fp32 residual
+    for T in (1, 7, 64, 128, HopperMixedStepGraphs.MAX_TOKENS):
+        residual = 3 * torch.randn(T, HIDDEN, generator=generator, device=DEVICE)
         partials = [torch.randn(T, HIDDEN, generator=generator, device=DEVICE).bfloat16() for _ in range(TP)]
-        want = (residual.float() + sum(p.float() for p in partials).bfloat16().float()).bfloat16()
-        norm_out = torch.empty_like(residual)
-        ops.ar_norm(partials[rank].clone(), residual, gamma, norm_out, *buffers, EPS, NORM_BIAS)
-        torch.cuda.synchronize()
-        assert torch.equal(residual, want)
-        rms = want.double() * torch.rsqrt(want.double().pow(2).mean(-1, keepdim=True) + EPS) * scale
-        torch.testing.assert_close(norm_out.double(), rms, rtol=1e-2, atol=1e-2)
+        want = residual + sum(p.float() for p in partials).bfloat16().float()
+        bound = StreamBound(residual)
+        bound.add([p.double() for p in partials])
+        reference = residual.double() + sum(p.double() for p in partials)
+        norm_out = torch.empty_like(partials[rank])
 
-    # a decode step's fp32 stream: the first layer starts it from the bf16 residual, which stays as it was
-    for T in (7, 64):
-        residual = (3 * torch.randn(T, HIDDEN, generator=generator, device=DEVICE)).bfloat16()
-        before = residual.clone()
-        stream = residual.float()
-        norm_out = torch.empty_like(residual)
-        for layer in range(3):
-            partials = [torch.randn(T, HIDDEN, generator=generator, device=DEVICE).bfloat16() for _ in range(TP)]
-            stream = stream + sum(p.float() for p in partials).bfloat16().float()
-            ops.ar_norm(
-                partials[rank].clone(), residual, gamma, norm_out, *buffers, EPS, NORM_BIAS, DecodeAllReduce.stream32,
-                layer == 0,
-            )  # fmt: skip
-            torch.cuda.synchronize()
-            assert torch.equal(DecodeAllReduce.stream32[:T], stream) and torch.equal(residual, before)
-            rms = stream.double() * torch.rsqrt(stream.double().pow(2).mean(-1, keepdim=True) + EPS) * scale
-            torch.testing.assert_close(norm_out.double(), rms, rtol=1e-2, atol=1e-2)
+        ops.ar_norm(partials[rank].clone(), residual, gamma, norm_out, *buffers, EPS, NORM_BIAS)
+
+        torch.cuda.synchronize()
+        assert torch.equal(residual, want) and bound.holds(residual, reference)
+        torch.testing.assert_close(norm_out.double(), rms_reference(want, gamma), rtol=BF16_ROUNDING, atol=NORM_ATOL)
+
+    # the decoder layers' op: up to the largest mixed-step graph the pair, above it vLLM's all-reduce (not in rank
+    # order) and the add + RMSNorm kernel; one bf16 rounding of the reduced rows either way
+    norm = types.SimpleNamespace(weight=gamma, variance_epsilon=EPS)
+    for T in (64, HopperMixedStepGraphs.MAX_TOKENS, ABOVE_GRAPH_ROWS):
+        residual = 3 * torch.randn(T, HIDDEN, generator=generator, device=DEVICE)
+        partials = [torch.randn(T, HIDDEN, generator=generator, device=DEVICE).bfloat16() for _ in range(TP)]
+        bound = StreamBound(residual)
+        bound.add([p.double() for p in partials])
+        reference = residual.double() + sum(p.double() for p in partials)
+
+        x, new_residual = AllReduceNorm.apply(partials[rank].clone(), residual, norm)
+
+        torch.cuda.synchronize()
+        assert new_residual.dtype == torch.float32 and bound.holds(new_residual, reference)
+        torch.testing.assert_close(x.double(), rms_reference(new_residual, gamma), rtol=BF16_ROUNDING, atol=NORM_ATOL)
+
+    # the decoder layers keep the residual stream in fp32 from the embedding to the final norm, on either path: every
+    # sublayer's reduced partials added once rounded, the stream itself never
+    vllm_norm = VllmQwen3_5RMSNorm(HIDDEN, EPS).to(device=DEVICE, dtype=torch.bfloat16)
+    vllm_norm.weight.data.copy_(gamma)
+    for T in (64, ABOVE_GRAPH_ROWS):
+        sublayer = ScaledPartial(rank)
+        layer = types.SimpleNamespace(
+            layer_type="linear_attention",
+            input_layernorm=vllm_norm,
+            post_attention_layernorm=vllm_norm,
+            linear_attn=sublayer,
+            mlp=sublayer,
+        )
+        embedding = (3 * torch.randn(T, HIDDEN, generator=generator, device=DEVICE)).bfloat16()
+        hidden_states, residual = embedding, None
+
+        for _ in range(STREAM_LAYERS):
+            hidden_states, residual = HopperQwen3_5DecoderLayer.forward(layer, hidden_states, residual)
+            assert residual.dtype == torch.float32
+        x, residual = AllReduceNorm.apply(hidden_states, residual, vllm_norm)
+
+        torch.cuda.synchronize()
+        bound = StreamBound(embedding)
+        reference = embedding.double()
+        for rows in sublayer.inputs:
+            partials = ScaledPartial.partials(rows)
+            bound.add(partials)
+            reference = reference + sum(partials)
+        assert len(sublayer.inputs) == 2 * STREAM_LAYERS and bound.holds(residual, reference)
+        assert not torch.equal(residual, residual.bfloat16().float())  # the stream holds more than bf16's bits
+        torch.testing.assert_close(x.double(), rms_reference(residual, gamma), rtol=BF16_ROUNDING, atol=NORM_ATOL)
 
     destroy_model_parallel()
     destroy_distributed_environment()
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < TP, reason="the decode all-reduce runs over four GPUs")
-def test_the_decode_all_reduce_on_four_ranks():
-    torch.multiprocessing.spawn(four_rank_checks, args=(get_free_port(LOCALHOST)[0],), nprocs=TP)
+@pytest.mark.skipif(torch.cuda.device_count() < TP, reason="the fused all-reduce runs over four GPUs")
+def test_the_fused_all_reduces_on_four_ranks(tmp_path):
+    # the ranks meet at a file of the test's own: a free port picked beforehand can be taken by another process
+    # before rank 0 binds it
+    torch.multiprocessing.spawn(four_rank_checks, args=(str(tmp_path / "rendezvous"),), nprocs=TP)
+
+
+def test_the_add_rmsnorm_against_fp64():
+    HopperExtension.load()
+    generator = torch.Generator(device=DEVICE).manual_seed(7)
+    gamma = (0.1 * torch.randn(HIDDEN, generator=generator, device=DEVICE)).bfloat16()
+
+    for T in (1, ABOVE_GRAPH_ROWS):
+        reduced = torch.randn(T, HIDDEN, generator=generator, device=DEVICE).bfloat16()
+        residual = 3 * torch.randn(T, HIDDEN, generator=generator, device=DEVICE)
+        want = residual + reduced.float()
+        norm_out = torch.empty_like(reduced)
+
+        torch.ops.pear_rollout_hopper.add_rmsnorm(reduced, residual, gamma, norm_out, EPS, NORM_BIAS)
+
+        torch.cuda.synchronize()
+        assert torch.equal(residual, want)
+        torch.testing.assert_close(norm_out.double(), rms_reference(want, gamma), rtol=BF16_ROUNDING, atol=NORM_ATOL)
 
 
 def test_the_sampler_draws_from_the_softmax(monkeypatch):
@@ -383,10 +515,9 @@ def test_the_sampler_draws_from_the_softmax(monkeypatch):
     flat = torch.randn(SAMPLER_ROWS, VOCAB, generator=generator, device=DEVICE) * 2
 
     for logits in (peaked, flat, peaked[:1]):
-        result = HopperSampler.sample(logits, temperature, MAX_LOGPROBS)
-        tensors = result.logprobs_tensors
+        sampled, tensors = HopperSampler.draw_rows(logits, temperature[: len(logits)], MAX_LOGPROBS)
         ids, logprobs, ranks = tensors.logprob_token_ids, tensors.logprobs, tensors.selected_token_ranks
-        sampled = result.sampled_token_ids[:, 0].long()
+        assert sampled.dtype == torch.int64
         lp = (logits / temperature[: len(logits), None]).log_softmax(-1)
         top_lp, top_ids = lp.topk(MAX_LOGPROBS, -1)
         sampled_lp = lp.gather(1, sampled[:, None])
@@ -402,7 +533,7 @@ def test_the_sampler_draws_from_the_softmax(monkeypatch):
     logits[:, : len(probs)] = probs.log()
     counts = torch.zeros(len(probs), device=DEVICE)
     for _ in range(DRAWS):
-        sampled = HopperSampler.sample(logits, torch.ones(256, device=DEVICE), MAX_LOGPROBS).sampled_token_ids[:, 0]
+        sampled, _ = HopperSampler.draw_rows(logits, torch.ones(256, device=DEVICE), MAX_LOGPROBS)
         assert (sampled < len(probs)).all()
         counts += torch.bincount(sampled.long(), minlength=len(probs)).float()
     draws = 256 * DRAWS
